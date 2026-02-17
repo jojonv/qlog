@@ -119,7 +119,8 @@ impl App {
         match self.mode {
             Mode::FilterInput => self.handle_filter_input_key(key),
             Mode::Command => self.handle_command_key(key),
-            Mode::Filter | Mode::DateRange => {}
+            Mode::Filter => self.handle_filter_key(key),
+            Mode::DateRange => {}
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -127,7 +128,7 @@ impl App {
     fn handle_filter_input_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                self.mode = Mode::Filter;
                 self.input_buffer.clear();
                 self.pending_new_group = false;
             }
@@ -152,7 +153,7 @@ impl App {
                         self.filters.groups[self.selected_group].filters.len() - 1;
                     self.update_filtered_logs();
                 }
-                self.mode = Mode::Normal;
+                self.mode = Mode::Filter;
                 self.input_buffer.clear();
                 self.pending_new_group = false;
             }
@@ -192,6 +193,51 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Char('j') | KeyCode::Down => {
+                if self.selected_line < self.filtered_logs.len().saturating_sub(1) {
+                    self.selected_line += 1;
+                }
+                self.clamp_scroll();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.selected_line = self.selected_line.saturating_sub(1);
+                self.clamp_scroll();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.horizontal_scroll = self.horizontal_scroll.saturating_add(4);
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.horizontal_scroll = self.horizontal_scroll.saturating_sub(4);
+            }
+            KeyCode::Char('G') => {
+                self.selected_line = self.filtered_logs.len().saturating_sub(1);
+                self.clamp_scroll();
+            }
+            KeyCode::Char('g') if key.modifiers.contains(crossterm::event::KeyModifiers::NONE) => {
+                self.selected_line = 0;
+                self.scroll_offset = 0;
+            }
+            KeyCode::Char('t') => {
+                self.mode = Mode::Filter;
+            }
+            KeyCode::Char(':') => {
+                self.mode = Mode::Command;
+            }
+            _ => {}
+        }
+    }
+
+    fn clamp_scroll(&mut self) {
+        let visible_height = 20;
+        if self.selected_line < self.scroll_offset {
+            self.scroll_offset = self.selected_line;
+        } else if self.selected_line >= self.scroll_offset + visible_height {
+            self.scroll_offset = self.selected_line.saturating_sub(visible_height - 1);
+        }
+    }
+
+    fn handle_filter_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
                 if !self.filters.groups.is_empty() {
                     let group = &self.filters.groups[self.selected_group];
                     if self.selected_filter + 1 < group.filters.len() {
@@ -214,12 +260,6 @@ impl App {
                     self.ensure_valid_selection();
                 }
             }
-            KeyCode::Char('G') => {
-                self.selected_line = self.filtered_logs.len().saturating_sub(1);
-            }
-            KeyCode::Char('g') if key.modifiers.contains(crossterm::event::KeyModifiers::NONE) => {
-                self.selected_line = 0;
-            }
             KeyCode::Char(' ') => {
                 self.filters
                     .toggle_filter(self.selected_group, self.selected_filter);
@@ -241,8 +281,8 @@ impl App {
                 self.pending_new_group = false;
                 self.mode = Mode::FilterInput;
             }
-            KeyCode::Char(':') => {
-                self.mode = Mode::Command;
+            KeyCode::Char('t') | KeyCode::Esc => {
+                self.mode = Mode::Normal;
             }
             _ => {}
         }

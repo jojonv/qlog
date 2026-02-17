@@ -177,17 +177,33 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let mode_name = match app.mode {
+        Mode::Normal => "CONTENT",
+        Mode::Filter => "FILTER",
+        Mode::FilterInput => "INPUT",
+        Mode::Command => "COMMAND",
+        Mode::DateRange => "DATE",
+    };
+
     let help_text = match app.mode {
-        Mode::Normal => "h/j/k/l: Navigate | f: Add filter | F: New group+filter | Space: Toggle filter mode",
-        Mode::Filter => "j/k: Move in group | h/l: Change group | d: Delete | Space: Toggle | Esc: Cancel | f: Add",
+        Mode::Normal => "j/k: Scroll | h/l: H-scroll | g/G: Top/Bottom | t: Filter mode | q: Quit",
+        Mode::Filter => "j/k: Select filter | h/l: Switch group | f/F: Add filter | d: Delete | Space: Toggle | t/Esc: Content mode",
         Mode::FilterInput => "Enter: Confirm | Esc: Cancel",
         Mode::Command => "Command mode",
         Mode::DateRange => "Date range mode (unused)",
     };
 
+    let mode_style = match app.mode {
+        Mode::Normal => Style::default().fg(Color::Green),
+        Mode::Filter => Style::default().fg(Color::Cyan),
+        Mode::FilterInput => Style::default().fg(Color::Yellow),
+        Mode::Command => Style::default().fg(Color::Magenta),
+        Mode::DateRange => Style::default().fg(Color::Red),
+    };
+
     let status_text = format!(
-        "{} | Line {}/{} | {}",
-        app.status_message,
+        "[{}] Line {}/{} | {}",
+        mode_name,
         app.selected_line + 1,
         app.filtered_logs.len(),
         help_text
@@ -195,12 +211,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     let status_bar = Paragraph::new(status_text)
         .block(Block::default().borders(Borders::ALL))
-        .style(match app.mode {
-            Mode::Normal => Style::default(),
-            Mode::Filter => Style::default().fg(Color::Cyan),
-            Mode::FilterInput => Style::default().fg(Color::Yellow),
-            _ => Style::default().fg(Color::Yellow),
-        });
+        .style(mode_style);
     frame.render_widget(status_bar, area);
 }
 
