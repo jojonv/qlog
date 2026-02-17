@@ -1,5 +1,6 @@
 use crate::model::{FilterSet, LogEntry};
 use crossterm::event::KeyCode;
+use std::cell::Cell;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,6 +37,12 @@ pub struct App {
     pub selected_filter: usize,
     pub input_buffer: String,
     pub pending_new_group: bool,
+    pub wrap_mode: bool,
+    pub viewport_height: Cell<usize>,
+    pub viewport_width: Cell<usize>,
+    pub max_line_width: usize,
+    pub visual_line_offsets: Vec<usize>,
+    pub total_visual_lines: usize,
 }
 
 impl App {
@@ -56,6 +63,12 @@ impl App {
             selected_filter: 0,
             input_buffer: String::new(),
             pending_new_group: false,
+            wrap_mode: true,
+            viewport_height: Cell::new(20),
+            viewport_width: Cell::new(80),
+            max_line_width: 0,
+            visual_line_offsets: Vec::new(),
+            total_visual_lines: 0,
         }
     }
 
@@ -96,6 +109,65 @@ impl App {
             .filter(|entry| self.filters.matches(entry))
             .cloned()
             .collect();
+        self.recalculate_max_line_width();
+        self.recalculate_visual_lines();
+    }
+
+    pub fn recalculate_max_line_width(&mut self) {
+        self.max_line_width = self
+            .filtered_logs
+            .iter()
+            .map(|entry| {
+                let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
+                ts_len + entry.raw.chars().count()
+            })
+            .max()
+            .unwrap_or(0);
+    }
+
+    pub fn recalculate_visual_lines(&mut self) {
+        self.visual_line_offsets.clear();
+        if self.filtered_logs.is_empty() {
+            self.total_visual_lines = 0;
+            return;
+        }
+
+        let viewport_width = self.viewport_width.get();
+        let mut offset = 0usize;
+
+        for entry in &self.filtered_logs {
+            self.visual_line_offsets.push(offset);
+            let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
+            let text_width = ts_len + entry.raw.chars().count();
+            let visual_lines = if self.wrap_mode && viewport_width > 0 {
+                ((text_width + viewport_width - 1) / viewport_width).max(1)
+            } else {
+                1
+            };
+            offset += visual_lines;
+        }
+        self.total_visual_lines = offset;
+    }
+
+    pub fn selected_visual_line(&self) -> usize {
+        self.visual_line_offsets
+            .get(self.selected_line)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn scroll_visual_line(&self) -> usize {
+        self.visual_line_offsets
+            .get(self.scroll_offset)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn find_entry_by_visual_line(&self, target_visual: usize) -> usize {
+        match self.visual_line_offsets.binary_search(&target_visual) {
+            Ok(idx) => idx,
+            Err(idx) => idx.saturating_sub(1),
+        }
     }
 
     fn ensure_valid_selection(&mut self) {
@@ -193,12 +265,14 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Char('j') | KeyCode::Down => {
+                self.status_message.clear();
                 if self.selected_line < self.filtered_logs.len().saturating_sub(1) {
                     self.selected_line += 1;
                 }
                 self.clamp_scroll();
             }
             KeyCode::Char('k') | KeyCode::Up => {
+                self.status_message.clear();
                 self.selected_line = self.selected_line.saturating_sub(1);
                 self.clamp_scroll();
             }
@@ -222,16 +296,43 @@ impl App {
             KeyCode::Char(':') => {
                 self.mode = Mode::Command;
             }
+            KeyCode::Char('w') => {
+                self.wrap_mode = !self.wrap_mode;
+                self.recalculate_visual_lines();
+                self.clamp_scroll();
+                self.status_message = if self.wrap_mode {
+                    "Wrap mode enabled".to_string()
+                } else {
+                    "Wrap mode disabled".to_string()
+                };
+            }
             _ => {}
         }
     }
 
     fn clamp_scroll(&mut self) {
-        let visible_height = 20;
+        if self.filtered_logs.is_empty() {
+            return;
+        }
+
+        self.selected_line = self
+            .selected_line
+            .min(self.filtered_logs.len().saturating_sub(1));
+
+        let viewport_height = self.viewport_height.get();
+
+        let effective_height = if self.wrap_mode {
+            (viewport_height / 2).max(1)
+        } else {
+            viewport_height
+        };
+
         if self.selected_line < self.scroll_offset {
             self.scroll_offset = self.selected_line;
-        } else if self.selected_line >= self.scroll_offset + visible_height {
-            self.scroll_offset = self.selected_line.saturating_sub(visible_height - 1);
+        } else if self.selected_line >= self.scroll_offset + effective_height {
+            self.scroll_offset = self
+                .selected_line
+                .saturating_sub(effective_height.saturating_sub(1));
         }
     }
 

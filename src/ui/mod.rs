@@ -3,9 +3,18 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
+
+/// Calculate how many visual lines an entry will occupy when wrapped
+fn count_visual_lines(text_width: usize, viewport_width: usize) -> usize {
+    if viewport_width == 0 || text_width == 0 {
+        return 1;
+    }
+    // Ceiling division: (text_width + viewport_width - 1) / viewport_width
+    ((text_width + viewport_width - 1) / viewport_width).max(1)
+}
 
 pub fn draw(frame: &mut Frame, app: &App) {
     if let LoadingStatus::Loading { current, total } = &app.loading_status {
@@ -132,11 +141,48 @@ fn draw_filter_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
 }
 
 fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let inner_area = area.inner(&ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+
+    let content_height = inner_area.height as usize;
+    let viewport_width = inner_area.width as usize;
+    app.viewport_height.set(content_height);
+    app.viewport_width.set(viewport_width);
+
+    // Calculate how many entries fit in the viewport, accounting for wrap mode
+    let mut entries_to_take = 0usize;
+    let mut total_visual_lines = 0usize;
+
+    for entry in app.filtered_logs.iter().skip(app.scroll_offset) {
+        let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
+        let text_width = ts_len + entry.raw.chars().count();
+
+        let visual_lines = if app.wrap_mode {
+            count_visual_lines(text_width, viewport_width)
+        } else {
+            1
+        };
+
+        if total_visual_lines + visual_lines > content_height {
+            break;
+        }
+
+        total_visual_lines += visual_lines;
+        entries_to_take += 1;
+    }
+
+    // Ensure we take at least 1 entry if there are any
+    if entries_to_take == 0 && app.filtered_logs.len() > app.scroll_offset {
+        entries_to_take = 1;
+    }
+
     let log_lines: Vec<Line> = app
         .filtered_logs
         .iter()
         .skip(app.scroll_offset)
-        .take(area.height as usize)
+        .take(entries_to_take)
         .enumerate()
         .map(|(idx, entry)| {
             let is_selected = app.scroll_offset + idx == app.selected_line;
@@ -161,19 +207,70 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         })
         .collect();
 
-    let main_view = Paragraph::new(log_lines)
-        .block(
-            Block::default()
-                .title(format!(
-                    "Logs ({} total, {} filtered)",
-                    app.logs.len(),
-                    app.filtered_logs.len()
-                ))
-                .borders(Borders::ALL),
-        )
-        .wrap(Wrap { trim: true })
+    let wrap_indicator = if app.wrap_mode { "[WRAP]" } else { "[nowrap]" };
+    let title = format!(
+        "Logs ({} total, {} filtered) {} [max:{} vw:{}]",
+        app.logs.len(),
+        app.filtered_logs.len(),
+        wrap_indicator,
+        app.max_line_width,
+        inner_area.width
+    );
+
+    let mut main_view = Paragraph::new(log_lines)
+        .block(Block::default().title(title).borders(Borders::ALL))
         .scroll((0, app.horizontal_scroll as u16));
+
+    if app.wrap_mode {
+        main_view = main_view.wrap(Wrap { trim: true });
+    }
+
     frame.render_widget(main_view, area);
+
+    // Fast scrollbar calculation - use entry counts, not visual lines
+    let total_entries = app.filtered_logs.len();
+    let scroll_position = app.scroll_offset;
+
+    let show_vertical = total_entries > content_height;
+    let show_horizontal = !app.wrap_mode && app.max_line_width > viewport_width;
+
+    if show_vertical {
+        let vertical_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .track_symbol(Some("│"))
+            .end_symbol(Some("▼"));
+
+        let mut v_scroll_state = ScrollbarState::new(total_entries)
+            .viewport_content_length(content_height)
+            .position(scroll_position);
+
+        frame.render_stateful_widget(vertical_scrollbar, area, &mut v_scroll_state);
+    }
+
+    if show_horizontal {
+        // Render horizontal scrollbar on area that excludes vertical scrollbar space
+        let h_area = if show_vertical {
+            ratatui::layout::Rect {
+                x: area.x,
+                y: area.y + area.height.saturating_sub(1),
+                width: area.width.saturating_sub(1),
+                height: 1,
+            }
+        } else {
+            area
+        };
+
+        let horizontal_scrollbar = Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+            .begin_symbol(Some("◄"))
+            .track_symbol(Some("─"))
+            .end_symbol(Some("►"));
+
+        let mut h_scroll_state = ScrollbarState::new(app.max_line_width)
+            .viewport_content_length(viewport_width)
+            .position(app.horizontal_scroll);
+
+        frame.render_stateful_widget(horizontal_scrollbar, h_area, &mut h_scroll_state);
+    }
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -186,7 +283,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
 
     let help_text = match app.mode {
-        Mode::Normal => "j/k: Scroll | h/l: H-scroll | g/G: Top/Bottom | t: Filter mode | q: Quit",
+        Mode::Normal => "j/k: Scroll | h/l: H-scroll | w: Wrap | g/G: Top/Bottom | t: Filter mode | q: Quit",
         Mode::Filter => "j/k: Select filter | h/l: Switch group | f/F: Add filter | d: Delete | Space: Toggle | t/Esc: Content mode",
         Mode::FilterInput => "Enter: Confirm | Esc: Cancel",
         Mode::Command => "Command mode",
@@ -201,13 +298,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Mode::DateRange => Style::default().fg(Color::Red),
     };
 
-    let status_text = format!(
-        "[{}] Line {}/{} | {}",
-        mode_name,
-        app.selected_line + 1,
-        app.filtered_logs.len(),
-        help_text
-    );
+    let status_text = if app.status_message.is_empty() {
+        format!(
+            "[{}] Line {}/{} | {}",
+            mode_name,
+            app.selected_line + 1,
+            app.filtered_logs.len(),
+            help_text
+        )
+    } else {
+        format!("[{}] {}", mode_name, app.status_message)
+    };
 
     let status_bar = Paragraph::new(status_text)
         .block(Block::default().borders(Borders::ALL))
