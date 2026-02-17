@@ -1,4 +1,4 @@
-use crate::model::{Filter, FilterSet, LogEntry};
+use crate::model::{FilterSet, LogEntry};
 use crossterm::event::KeyCode;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -6,15 +6,16 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 pub enum Mode {
     Normal,
     Filter,
-    DateRange,
+    FilterInput,
     Command,
+    DateRange,
 }
 
 #[derive(Debug, Clone)]
 pub enum LoadingStatus {
     Idle,
     Loading { current: usize, total: usize },
-    Complete { loaded: usize, errors: usize },
+    Complete,
     Error(String),
 }
 
@@ -31,6 +32,10 @@ pub struct App {
     pub selected_line: usize,
     pub loading_status: LoadingStatus,
     pub log_receiver: Option<Receiver<Vec<LogEntry>>>,
+    pub selected_group: usize,
+    pub selected_filter: usize,
+    pub input_buffer: String,
+    pub pending_new_group: bool,
 }
 
 impl App {
@@ -47,6 +52,10 @@ impl App {
             selected_line: 0,
             loading_status: LoadingStatus::Idle,
             log_receiver: None,
+            selected_group: 0,
+            selected_filter: 0,
+            input_buffer: String::new(),
+            pending_new_group: false,
         }
     }
 
@@ -62,7 +71,6 @@ impl App {
 
     pub fn check_for_loaded_logs(&mut self) {
         if let Some(ref receiver) = self.log_receiver {
-            // Try to receive any new logs without blocking
             while let Ok(new_logs) = receiver.try_recv() {
                 self.logs.extend(new_logs);
                 if let LoadingStatus::Loading { current, total } = self.loading_status {
@@ -76,10 +84,7 @@ impl App {
     }
 
     pub fn finish_loading(&mut self) {
-        self.loading_status = LoadingStatus::Complete {
-            loaded: self.logs.len(),
-            errors: 0,
-        };
+        self.loading_status = LoadingStatus::Complete;
         self.log_receiver = None;
         self.update_filtered_logs();
     }
@@ -93,27 +98,121 @@ impl App {
             .collect();
     }
 
+    fn ensure_valid_selection(&mut self) {
+        if self.filters.groups.is_empty() {
+            self.selected_group = 0;
+            self.selected_filter = 0;
+            return;
+        }
+        self.selected_group = self.selected_group.min(self.filters.groups.len() - 1);
+        if !self.filters.groups.is_empty() {
+            let group = &self.filters.groups[self.selected_group];
+            if group.filters.is_empty() {
+                self.selected_filter = 0;
+            } else {
+                self.selected_filter = self.selected_filter.min(group.filters.len() - 1);
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        match self.mode {
+            Mode::FilterInput => self.handle_filter_input_key(key),
+            Mode::Command => self.handle_command_key(key),
+            Mode::Filter | Mode::DateRange => {}
+            Mode::Normal => self.handle_normal_key(key),
+        }
+    }
+
+    fn handle_filter_input_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                if self.mode == Mode::Normal {
-                    self.should_quit = true;
-                } else {
-                    self.mode = Mode::Normal;
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.input_buffer.clear();
+                self.pending_new_group = false;
+            }
+            KeyCode::Enter => {
+                if !self.input_buffer.trim().is_empty() {
+                    if self.pending_new_group {
+                        self.filters.add_group();
+                        self.selected_group = self.filters.groups.len() - 1;
+                        self.selected_filter = 0;
+                    }
+                    if self.filters.groups.is_empty() {
+                        self.filters.add_group();
+                        self.selected_group = 0;
+                        self.selected_filter = 0;
+                    }
+                    self.filters.add_filter_to_group(
+                        self.selected_group,
+                        self.input_buffer.trim().to_string(),
+                    );
+                    self.ensure_valid_selection();
+                    self.selected_filter =
+                        self.filters.groups[self.selected_group].filters.len() - 1;
+                    self.update_filtered_logs();
                 }
+                self.mode = Mode::Normal;
+                self.input_buffer.clear();
+                self.pending_new_group = false;
+            }
+            KeyCode::Backspace => {
+                self.input_buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                self.input_buffer.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_command_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.input_buffer.clear();
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                self.input_buffer.clear();
+            }
+            KeyCode::Backspace => {
+                self.input_buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                self.input_buffer.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.selected_line =
-                    (self.selected_line + 1).min(self.filtered_logs.len().saturating_sub(1));
+                if !self.filters.groups.is_empty() {
+                    let group = &self.filters.groups[self.selected_group];
+                    if self.selected_filter + 1 < group.filters.len() {
+                        self.selected_filter += 1;
+                    }
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.selected_line = self.selected_line.saturating_sub(1);
+                self.selected_filter = self.selected_filter.saturating_sub(1);
             }
             KeyCode::Char('h') | KeyCode::Left => {
-                self.horizontal_scroll = self.horizontal_scroll.saturating_sub(1);
+                if self.selected_group > 0 {
+                    self.selected_group -= 1;
+                    self.ensure_valid_selection();
+                }
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                self.horizontal_scroll += 1;
+                if self.selected_group + 1 < self.filters.groups.len() {
+                    self.selected_group += 1;
+                    self.ensure_valid_selection();
+                }
             }
             KeyCode::Char('G') => {
                 self.selected_line = self.filtered_logs.len().saturating_sub(1);
@@ -122,13 +221,25 @@ impl App {
                 self.selected_line = 0;
             }
             KeyCode::Char(' ') => {
-                // Toggle filter
+                self.filters
+                    .toggle_filter(self.selected_group, self.selected_filter);
+                self.update_filtered_logs();
             }
             KeyCode::Char('d') => {
-                // Delete filter
+                if !self.filters.groups.is_empty() {
+                    self.filters
+                        .remove_filter(self.selected_group, self.selected_filter);
+                    self.ensure_valid_selection();
+                    self.update_filtered_logs();
+                }
+            }
+            KeyCode::Char('F') => {
+                self.pending_new_group = true;
+                self.mode = Mode::FilterInput;
             }
             KeyCode::Char('f') => {
-                self.mode = Mode::Filter;
+                self.pending_new_group = false;
+                self.mode = Mode::FilterInput;
             }
             KeyCode::Char(':') => {
                 self.mode = Mode::Command;

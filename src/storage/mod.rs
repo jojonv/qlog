@@ -1,3 +1,3 @@
 pub mod loader;
 
-pub use loader::{LoadStats, LogLoader};
+pub use loader::{LoadStat, LogLoader};

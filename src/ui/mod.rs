@@ -8,7 +8,6 @@ use ratatui::{
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    // Show loading screen if still loading
     if let LoadingStatus::Loading { current, total } = &app.loading_status {
         draw_loading_screen(frame, *current, *total, app.logs.len());
         return;
@@ -16,76 +15,149 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Filter bar
-            Constraint::Min(0),    // Main view
-            Constraint::Length(3), // Status bar
-        ])
-        .split(frame.size());
-
-    // Filter bar
-    let filter_spans: Vec<Span> = app
-        .filters
-        .filters
-        .iter()
-        .enumerate()
-        .flat_map(|(_i, (filter, enabled))| {
-            let style = if *enabled {
-                Style::default()
-                    .fg(match filter {
-                        crate::model::Filter::Level(l) => match l {
-                            crate::model::LogLevel::Error => Color::Red,
-                            crate::model::LogLevel::Warning => Color::Yellow,
-                            crate::model::LogLevel::Information => Color::Green,
-                        },
-                        _ => Color::Cyan,
-                    })
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-
+        .constraints(if matches!(app.mode, Mode::FilterInput) {
             vec![
-                Span::styled(format!("[{}]", filter.display_name()), style),
-                Span::raw(" "),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(3),
+            ]
+        } else {
+            vec![
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(3),
             ]
         })
-        .collect();
+        .split(frame.size());
 
-    let filter_bar = Paragraph::new(Line::from(filter_spans))
+    draw_filter_bar(frame, app, chunks[0]);
+
+    let main_chunk;
+    let status_chunk;
+
+    if matches!(app.mode, Mode::FilterInput) {
+        draw_filter_input(frame, app, chunks[1]);
+        main_chunk = chunks[2];
+        status_chunk = chunks[3];
+    } else {
+        main_chunk = chunks[1];
+        status_chunk = chunks[2];
+    }
+
+    draw_main_view(frame, app, main_chunk);
+    draw_status_bar(frame, app, status_chunk);
+}
+
+fn draw_filter_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let mut spans: Vec<Span> = Vec::new();
+
+    for (gi, group) in app.filters.groups.iter().enumerate() {
+        if gi > 0 {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::Yellow)));
+        }
+
+        if group.filters.is_empty() {
+            let is_selected = app.mode == Mode::Filter && app.selected_group == gi;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled("(empty)", style));
+        } else {
+            for (fi, filter) in group.filters.iter().enumerate() {
+                if fi > 0 {
+                    spans.push(Span::styled(" OR ", Style::default().fg(Color::Green)));
+                }
+
+                let is_selected = app.mode == Mode::Filter
+                    && app.selected_group == gi
+                    && app.selected_filter == fi;
+
+                let base_style = if filter.enabled {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::CROSSED_OUT)
+                };
+
+                let style = if is_selected {
+                    base_style
+                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::UNDERLINED)
+                } else {
+                    base_style
+                };
+
+                let prefix = if filter.enabled { "" } else { "⊘ " };
+                spans.push(Span::styled(format!("{}{}", prefix, filter.text), style));
+            }
+        }
+    }
+
+    if app.filters.groups.is_empty() {
+        spans.push(Span::styled(
+            "No filters (press 'f' to add)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let filter_bar = Paragraph::new(Line::from(spans))
         .block(Block::default().title("Filters").borders(Borders::ALL));
-    frame.render_widget(filter_bar, chunks[0]);
+    frame.render_widget(filter_bar, area);
+}
 
-    // Main view - log list
+fn draw_filter_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let prefix = if app.pending_new_group {
+        "[New Group] "
+    } else {
+        "[Add Filter] "
+    };
+
+    let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
+
+    let line = Line::from(vec![
+        Span::styled(prefix, Style::default().fg(Color::Yellow)),
+        Span::styled(&app.input_buffer, Style::default().fg(Color::White)),
+        Span::styled(" ", cursor_style),
+    ]);
+
+    let input_box =
+        Paragraph::new(line).block(Block::default().title("Filter Input").borders(Borders::ALL));
+    frame.render_widget(input_box, area);
+}
+
+fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let log_lines: Vec<Line> = app
         .filtered_logs
         .iter()
         .skip(app.scroll_offset)
-        .take(chunks[1].height as usize)
-        .map(|entry| {
-            let level_color = match entry.level {
-                crate::model::LogLevel::Error => Color::Red,
-                crate::model::LogLevel::Warning => Color::Yellow,
-                crate::model::LogLevel::Information => Color::White,
+        .take(area.height as usize)
+        .enumerate()
+        .map(|(idx, entry)| {
+            let is_selected = app.scroll_offset + idx == app.selected_line;
+            let base_style = if is_selected {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
             };
 
-            Line::from(vec![
-                Span::styled(
-                    entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    entry.level.as_str(),
-                    Style::default()
-                        .fg(level_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(entry.source(), Style::default().fg(Color::Blue)),
-                Span::raw(" "),
-                Span::raw(entry.message.clone()),
-            ])
+            let mut spans = Vec::new();
+
+            if let Some(ts) = &entry.timestamp {
+                spans.push(Span::styled(
+                    ts.format("%Y-%m-%d %H:%M:%S ").to_string(),
+                    base_style.fg(Color::Cyan),
+                ));
+            }
+
+            spans.push(Span::styled(&entry.raw, base_style));
+
+            Line::from(spans)
         })
         .collect();
 
@@ -101,36 +173,46 @@ pub fn draw(frame: &mut Frame, app: &App) {
         )
         .wrap(Wrap { trim: true })
         .scroll((0, app.horizontal_scroll as u16));
-    frame.render_widget(main_view, chunks[1]);
+    frame.render_widget(main_view, area);
+}
 
-    // Status bar
+fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let help_text = match app.mode {
+        Mode::Normal => "h/j/k/l: Navigate | f: Add filter | F: New group+filter | Space: Toggle filter mode",
+        Mode::Filter => "j/k: Move in group | h/l: Change group | d: Delete | Space: Toggle | Esc: Cancel | f: Add",
+        Mode::FilterInput => "Enter: Confirm | Esc: Cancel",
+        Mode::Command => "Command mode",
+        Mode::DateRange => "Date range mode (unused)",
+    };
+
     let status_text = format!(
-        "{} | Line {}/{} | h/j/k/l: Navigate | q: Quit | f: Filter | Space: Toggle",
+        "{} | Line {}/{} | {}",
         app.status_message,
         app.selected_line + 1,
-        app.filtered_logs.len()
+        app.filtered_logs.len(),
+        help_text
     );
 
     let status_bar = Paragraph::new(status_text)
         .block(Block::default().borders(Borders::ALL))
         .style(match app.mode {
             Mode::Normal => Style::default(),
+            Mode::Filter => Style::default().fg(Color::Cyan),
+            Mode::FilterInput => Style::default().fg(Color::Yellow),
             _ => Style::default().fg(Color::Yellow),
         });
-    frame.render_widget(status_bar, chunks[2]);
+    frame.render_widget(status_bar, area);
 }
 
 fn draw_loading_screen(frame: &mut Frame, current: usize, total: usize, entries: usize) {
     let area = frame.size();
 
-    // Calculate progress percentage
     let progress_pct = if total > 0 {
         (current * 100) / total
     } else {
         0
     };
 
-    // Create loading text
     let loading_text = Text::from(vec![
         Line::from(vec![Span::styled(
             "Loading Como Log Viewer...",

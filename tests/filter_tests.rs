@@ -1,68 +1,94 @@
-use chrono::{FixedOffset, TimeZone};
-use como_log_viewer::model::{Filter, LogEntry, LogLevel};
+use como_log_viewer::model::{Filter, FilterGroup, FilterSet, LogEntry};
 
-fn create_test_entry(level: LogLevel, message: &str, source: &str) -> LogEntry {
-    LogEntry {
-        timestamp: FixedOffset::west_opt(5 * 3600)
-            .unwrap()
-            .with_ymd_and_hms(2026, 2, 13, 14, 23, 1)
-            .unwrap(),
-        level,
-        message: message.to_string(),
-        message_template: message.to_string(),
-        properties: serde_json::json!({"SourceContext": source}),
-        exception: None,
-    }
+fn create_test_entry(text: &str) -> LogEntry {
+    LogEntry::new(text.to_string(), None)
 }
 
 #[test]
-fn test_level_filter() {
-    let entry = create_test_entry(LogLevel::Error, "test", "App.Service");
+fn test_filter_matches_text() {
+    let entry = create_test_entry("Connection failed error");
 
-    assert!(Filter::Level(LogLevel::Error).matches(&entry));
-    assert!(!Filter::Level(LogLevel::Warning).matches(&entry));
+    let filter = Filter::new("error".to_string());
+    assert!(filter.matches(&entry.raw));
+
+    let filter2 = Filter::new("success".to_string());
+    assert!(!filter2.matches(&entry.raw));
 }
 
 #[test]
-fn test_text_filter() {
-    let entry = create_test_entry(LogLevel::Information, "Connection failed", "App.Service");
+fn test_filter_can_be_disabled() {
+    let entry = create_test_entry("error message");
 
-    assert!(Filter::Text("failed".to_string()).matches(&entry));
-    assert!(!Filter::Text("success".to_string()).matches(&entry));
+    let mut filter = Filter::new("error".to_string());
+    assert!(filter.matches(&entry.raw));
+
+    filter.enabled = false;
+    assert!(!filter.matches(&entry.raw));
 }
 
 #[test]
-fn test_date_range_filter() {
-    let entry = create_test_entry(LogLevel::Information, "test", "App.Service");
+fn test_filter_group_or_logic() {
+    let entry = create_test_entry("warning message");
 
-    let start = FixedOffset::west_opt(5 * 3600)
-        .unwrap()
-        .with_ymd_and_hms(2026, 2, 13, 0, 0, 0)
-        .unwrap();
-    let end = FixedOffset::west_opt(5 * 3600)
-        .unwrap()
-        .with_ymd_and_hms(2026, 2, 13, 23, 59, 59)
-        .unwrap();
+    let mut group = FilterGroup::new();
+    group.filters.push(Filter::new("error".to_string()));
+    group.filters.push(Filter::new("warning".to_string()));
 
-    assert!(Filter::DateRange(start, end).matches(&entry));
+    assert!(group.matches(&entry.raw));
 }
 
 #[test]
-fn test_source_filter() {
-    let entry = create_test_entry(LogLevel::Information, "test", "Kistler.AkvisIO.Service");
+fn test_filter_group_all_disabled() {
+    let entry = create_test_entry("error message");
 
-    assert!(Filter::SourceContext("Kistler".to_string()).matches(&entry));
-    assert!(!Filter::SourceContext("Other".to_string()).matches(&entry));
+    let mut group = FilterGroup::new();
+    let mut f1 = Filter::new("error".to_string());
+    f1.enabled = false;
+    group.filters.push(f1);
+
+    assert!(!group.matches(&entry.raw));
 }
 
 #[test]
-fn test_combined_filters() {
-    let entry = create_test_entry(LogLevel::Error, "Connection failed", "App.Service");
+fn test_filter_set_and_logic() {
+    let entry = create_test_entry("error warning message");
 
-    let filters = vec![
-        Filter::Level(LogLevel::Error),
-        Filter::Text("failed".to_string()),
-    ];
+    let mut set = FilterSet::new();
 
-    assert!(filters.iter().all(|f| f.matches(&entry)));
+    let mut group1 = FilterGroup::new();
+    group1.filters.push(Filter::new("error".to_string()));
+
+    let mut group2 = FilterGroup::new();
+    group2.filters.push(Filter::new("warning".to_string()));
+
+    set.groups.push(group1);
+    set.groups.push(group2);
+
+    assert!(set.matches(&entry));
+}
+
+#[test]
+fn test_filter_set_all_groups_required() {
+    let entry = create_test_entry("error message");
+
+    let mut set = FilterSet::new();
+
+    let mut group1 = FilterGroup::new();
+    group1.filters.push(Filter::new("error".to_string()));
+
+    let mut group2 = FilterGroup::new();
+    group2.filters.push(Filter::new("warning".to_string()));
+
+    set.groups.push(group1);
+    set.groups.push(group2);
+
+    assert!(!set.matches(&entry));
+}
+
+#[test]
+fn test_empty_filter_set_matches_all() {
+    let entry = create_test_entry("anything");
+    let set = FilterSet::new();
+
+    assert!(set.matches(&entry));
 }

@@ -27,55 +27,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if !entries.is_empty() {
                 println!("\nFirst entry:");
-                println!("  Timestamp: {}", entries[0].timestamp);
-                println!("  Level: {:?}", entries[0].level);
-                println!("  Source: {}", entries[0].source());
-                let msg = if entries[0].message.len() > 80 {
-                    format!("{:.80}...", entries[0].message)
+                if let Some(ts) = &entries[0].timestamp {
+                    println!("  Timestamp: {}", ts);
                 } else {
-                    entries[0].message.clone()
+                    println!("  Timestamp: (none detected)");
+                }
+                let msg = if entries[0].raw.len() > 80 {
+                    format!("{:.80}...", entries[0].raw)
+                } else {
+                    entries[0].raw.clone()
                 };
-                println!("  Message: {}", msg);
+                println!("  Raw: {}", msg);
 
                 println!("\nLast entry:");
                 let last = entries.len() - 1;
-                println!("  Timestamp: {}", entries[last].timestamp);
-                println!("  Level: {:?}", entries[last].level);
-                println!("  Source: {}", entries[last].source());
-                let msg = if entries[last].message.len() > 80 {
-                    format!("{:.80}...", entries[last].message)
+                if let Some(ts) = &entries[last].timestamp {
+                    println!("  Timestamp: {}", ts);
                 } else {
-                    entries[last].message.clone()
-                };
-                println!("  Message: {}", msg);
-
-                // Count by level
-                let mut info_count = 0usize;
-                let mut warn_count = 0usize;
-                let mut error_count = 0usize;
-
-                for entry in &entries {
-                    match entry.level {
-                        como_log_viewer::model::LogLevel::Information => info_count += 1,
-                        como_log_viewer::model::LogLevel::Warning => warn_count += 1,
-                        como_log_viewer::model::LogLevel::Error => error_count += 1,
-                    }
+                    println!("  Timestamp: (none detected)");
                 }
+                let msg = if entries[last].raw.len() > 80 {
+                    format!("{:.80}...", entries[last].raw)
+                } else {
+                    entries[last].raw.clone()
+                };
+                println!("  Raw: {}", msg);
 
-                println!("\nLevel breakdown:");
-                println!("  Information: {}", info_count);
-                println!("  Warning: {}", warn_count);
-                println!("  Error: {}", error_count);
+                let with_timestamp = entries.iter().filter(|e| e.timestamp.is_some()).count();
+                println!("\nTimestamp detection:");
+                println!("  With timestamp: {}/{}", with_timestamp, entries.len());
 
-                // Test date range
                 if entries.len() >= 2 {
-                    println!(
-                        "\nDate range: {} to {}",
-                        entries[0].timestamp.format("%Y-%m-%d %H:%M:%S"),
-                        entries[entries.len() - 1]
-                            .timestamp
-                            .format("%Y-%m-%d %H:%m:%S")
-                    );
+                    let first_ts = entries[0].timestamp.as_ref();
+                    let last_ts = entries[last].timestamp.as_ref();
+                    if let (Some(f), Some(l)) = (first_ts, last_ts) {
+                        println!(
+                            "\nDate range: {} to {}",
+                            f.format("%Y-%m-%d %H:%M:%S"),
+                            l.format("%Y-%m-%d %H:%M:%S")
+                        );
+                    }
                 }
             }
         }
