@@ -102,6 +102,10 @@ impl App {
         self.update_filtered_logs();
     }
 
+    pub fn extend_logs(&mut self, new_logs: Vec<LogEntry>) {
+        self.logs.extend(new_logs);
+    }
+
     pub fn update_filtered_logs(&mut self) {
         self.filtered_logs = self
             .logs

@@ -1,9 +1,11 @@
 use crate::model::{detect_timestamp, LogEntry};
+use memmap2::Mmap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 use std::sync::Mutex;
 
+#[allow(dead_code)]
 pub struct LogLoader {
     loaded_count: Mutex<usize>,
     total_files: usize,
@@ -59,7 +61,33 @@ impl LogLoader {
     }
 
     pub fn load_file(&self, path: &Path, logs: &mut Vec<LogEntry>) -> io::Result<usize> {
+        self.load_file_with_mmap(path, logs, u64::MAX)
+    }
+
+    pub fn load_file_with_mmap(
+        &self,
+        path: &Path,
+        logs: &mut Vec<LogEntry>,
+        mmap_threshold: u64,
+    ) -> io::Result<usize> {
         let file = File::open(path)?;
+        let metadata = file.metadata()?;
+        let file_size = metadata.len();
+
+        let count = if file_size > mmap_threshold {
+            self.load_with_mmap(&file, logs).unwrap_or_else(|_| {
+                drop(file);
+                let file = File::open(path).unwrap();
+                self.load_with_bufreader(file, logs).unwrap_or(0)
+            })
+        } else {
+            self.load_with_bufreader(file, logs)?
+        };
+
+        Ok(count)
+    }
+
+    fn load_with_bufreader(&self, file: File, logs: &mut Vec<LogEntry>) -> io::Result<usize> {
         let reader = BufReader::new(file);
         let mut count = 0;
 
@@ -70,6 +98,23 @@ impl LogLoader {
                     logs.push(LogEntry::new(line, timestamp));
                     count += 1;
                 }
+            }
+        }
+
+        Ok(count)
+    }
+
+    fn load_with_mmap(&self, file: &File, logs: &mut Vec<LogEntry>) -> io::Result<usize> {
+        let mmap = unsafe { Mmap::map(file)? };
+        let content = std::str::from_utf8(&mmap)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        let mut count = 0;
+        for line in content.lines() {
+            if !line.trim().is_empty() {
+                let timestamp = detect_timestamp(line);
+                logs.push(LogEntry::new(line.to_string(), timestamp));
+                count += 1;
             }
         }
 
@@ -115,5 +160,20 @@ mod tests {
         assert_eq!(lines, 1);
         assert_eq!(logs.len(), 1);
         assert!(logs[0].timestamp.is_none());
+    }
+
+    #[test]
+    fn test_load_file_with_mmap_small() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "2026-02-13T10:00:00Z Small file").unwrap();
+
+        let loader = LogLoader::new();
+        let mut logs = Vec::new();
+        let lines = loader
+            .load_file_with_mmap(temp_file.path(), &mut logs, 1024 * 1024)
+            .unwrap();
+
+        assert_eq!(lines, 1);
+        assert_eq!(logs.len(), 1);
     }
 }
