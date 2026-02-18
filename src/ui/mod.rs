@@ -24,19 +24,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if matches!(app.mode, Mode::FilterInput) {
-            vec![
+        .constraints(match app.mode {
+            Mode::FilterInput => vec![
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Min(0),
                 Constraint::Length(3),
-            ]
-        } else {
-            vec![
+            ],
+            Mode::Command => vec![
+                Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Min(0),
                 Constraint::Length(3),
-            ]
+            ],
+            _ => vec![
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(3),
+            ],
         })
         .split(frame.size());
 
@@ -45,13 +50,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let main_chunk;
     let status_chunk;
 
-    if matches!(app.mode, Mode::FilterInput) {
-        draw_filter_input(frame, app, chunks[1]);
-        main_chunk = chunks[2];
-        status_chunk = chunks[3];
-    } else {
-        main_chunk = chunks[1];
-        status_chunk = chunks[2];
+    match app.mode {
+        Mode::FilterInput => {
+            draw_filter_input(frame, app, chunks[1]);
+            main_chunk = chunks[2];
+            status_chunk = chunks[3];
+        }
+        Mode::Command => {
+            draw_command_input(frame, app, chunks[1]);
+            main_chunk = chunks[2];
+            status_chunk = chunks[3];
+        }
+        _ => {
+            main_chunk = chunks[1];
+            status_chunk = chunks[2];
+        }
     }
 
     draw_main_view(frame, app, main_chunk);
@@ -137,6 +150,20 @@ fn draw_filter_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
 
     let input_box =
         Paragraph::new(line).block(Block::default().title("Filter Input").borders(Borders::ALL));
+    frame.render_widget(input_box, area);
+}
+
+fn draw_command_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
+
+    let line = Line::from(vec![
+        Span::styled(":", Style::default().fg(Color::Magenta)),
+        Span::styled(&app.input_buffer, Style::default().fg(Color::White)),
+        Span::styled(" ", cursor_style),
+    ]);
+
+    let input_box =
+        Paragraph::new(line).block(Block::default().title("Command").borders(Borders::ALL));
     frame.render_widget(input_box, area);
 }
 
@@ -286,7 +313,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Mode::Normal => "j/k: Scroll | h/l: H-scroll | w: Wrap | g/G: Top/Bottom | t: Filter mode | q: Quit",
         Mode::Filter => "j/k: Select filter | h/l: Switch group | f/F: Add filter | d: Delete | Space: Toggle | t/Esc: Content mode",
         Mode::FilterInput => "Enter: Confirm | Esc: Cancel",
-        Mode::Command => "Command mode",
+        Mode::Command => "Enter: Execute | Esc: Cancel",
         Mode::DateRange => "Date range mode (unused)",
     };
 

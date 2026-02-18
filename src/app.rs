@@ -1,6 +1,9 @@
 use crate::model::{FilterSet, LogEntry};
+use chrono::Local;
 use crossterm::event::KeyCode;
 use std::cell::Cell;
+use std::fs::File;
+use std::io::{self, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -250,6 +253,7 @@ impl App {
                 self.input_buffer.clear();
             }
             KeyCode::Enter => {
+                self.execute_command();
                 self.mode = Mode::Normal;
                 self.input_buffer.clear();
             }
@@ -261,6 +265,79 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn execute_command(&mut self) {
+        let input = self.input_buffer.trim();
+        if input.is_empty() {
+            return;
+        }
+
+        let (command, filename) = Self::parse_command(input);
+
+        match command {
+            "w" | "write" => {
+                let output_filename = if filename.is_empty() {
+                    Self::generate_default_filename()
+                } else {
+                    filename.to_string()
+                };
+
+                match self.write_filtered_logs(&output_filename) {
+                    Ok(count) => {
+                        self.status_message =
+                            format!("Saved {} lines to {}", count, output_filename);
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Error: {}", e);
+                    }
+                }
+            }
+            _ => {
+                self.status_message = format!("Unknown command: {}", command);
+            }
+        }
+    }
+
+    fn parse_command(input: &str) -> (&str, &str) {
+        let input = input.trim();
+
+        if input.starts_with('"') {
+            if let Some(end_quote) = input[1..].find('"') {
+                let filename = &input[1..end_quote + 1];
+                let rest = &input[end_quote + 2..].trim_start();
+                if let Some(space_pos) = rest.find(' ') {
+                    let cmd = &rest[..space_pos];
+                    return (cmd, filename);
+                }
+                return (rest, filename);
+            }
+        }
+
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        if parts.len() == 2 {
+            let filename = parts[1].trim();
+            if filename.starts_with('"') && filename.ends_with('"') && filename.len() > 1 {
+                return (parts[0], &filename[1..filename.len() - 1]);
+            }
+            (parts[0], filename)
+        } else {
+            (parts[0], "")
+        }
+    }
+
+    fn generate_default_filename() -> String {
+        format!("filtered-logs-{}.log", Local::now().format("%Y%m%d-%H%M%S"))
+    }
+
+    fn write_filtered_logs(&self, filename: &str) -> io::Result<usize> {
+        let mut file = File::create(filename)?;
+        let mut count = 0;
+        for entry in &self.filtered_logs {
+            writeln!(file, "{}", entry.raw)?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) {
