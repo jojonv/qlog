@@ -4,13 +4,13 @@ A TUI (Terminal User Interface) application for viewing and filtering como-data-
 
 ## Features
 
-- **Unified Log View**: Merge all log files chronologically
-- **Flexible Filtering**: Apply/Remove multiple filters
-- **Helix Keybindings**: Navigation using hjkl, gg/G for goto top/bottom
-- **Color Coding**: Errors (Red), Warnings (Yellow), Information (Green)
-- **Async Loading**: Efficient memory-mapped file loading for large datasets
+- **Unified Log View**: Merge all log files chronologically with auto-detected timestamps
+- **Filter Groups**: Compose filters with OR-within-group, AND-between-groups logic
+- **Helix Keybindings**: Modal editing with hjkl navigation and filter management
+- **Generic Log Support**: Works with any text log format (not just JSON)
+- **Async Loading**: Efficient loading for large datasets
 - **Virtual Scrolling**: Handle millions of lines with only visible lines rendered
-- **Horizontal Scroll**: View wide JSON content
+- **Horizontal Scroll**: View wide log content with wrap mode toggle
 
 ## Installation
 
@@ -33,45 +33,61 @@ The binary will be at `target/release/como-log-viewer`.
 
 ## Keybindings
 
-### Navigation (Helix-style)
-- `h/j/k/l` - Navigate left/down/up/right (scroll)
-- `Ctrl+f` / `Ctrl+b` - Page down/up
-- `gg` / `G` - Go to top/bottom
-- `Arrow keys` - Alternative navigation
-
-### Filters
-- `f` - Open filter dialog
-- `Space` - Toggle filter on/off
-- `d` - Delete filter under cursor
-- `:` - Command mode for date ranges
-
-### General
+### Navigation (Normal Mode)
+- `j/k` or `Arrow Up/Down` - Scroll through logs
+- `h/l` or `Arrow Left/Right` - Horizontal scroll
+- `g` - Go to top
+- `G` - Go to bottom
+- `w` - Toggle wrap mode
+- `t` - Enter filter mode
 - `q` - Quit application
-- `Esc` - Cancel current operation
 
-## Filter Types
+### Filter Mode
+- `f` - Add filter to current group (opens input)
+- `F` (Shift+f) - Create new group and add filter
+- `j/k` - Select filter within group
+- `h/l` - Switch between groups
+- `Space` - Toggle filter on/off
+- `d` - Delete selected filter
+- `t` or `Esc` - Return to normal mode
 
-1. **Level Filter**: Filter by Information, Warning, or Error
-2. **Text Filter**: Search for text in message, source, or properties
-3. **Date Range Filter**: Filter by start/end timestamps
-4. **Source Context Filter**: Filter by specific source context
+### Filter Input Mode
+- `Enter` - Confirm filter text
+- `Esc` - Cancel input
+- `Backspace` - Delete character
 
-Multiple filters combine with AND logic.
+## Filter Groups
+
+Filters are organized into groups with powerful composition:
+
+- **Filters within a group** are combined with **OR** logic
+- **Groups** are combined with **AND** logic
+
+Example: `("error" OR "warning") AND ("timeout" OR "retry")`
+
+This creates two groups:
+1. Group 1: `error` OR `warning`
+2. Group 2: `timeout` OR `retry`
+
+A log line must match at least one filter from each group to be shown.
+
+Filter matching is **case-insensitive** substring search against the raw log line.
 
 ## Architecture
 
 ```
 src/
-├── main.rs        # Entry point and CLI args
-├── lib.rs         # Library exports
-├── app.rs         # Application state and event handling
-├── model/         # Data models
-│   ├── log_entry.rs  # Log entry structure
-│   └── filter.rs     # Filter definitions
-├── storage/       # File I/O
-│   └── loader.rs     # Async log loading
-└── ui/            # UI components
-    └── mod.rs        # Main UI rendering
+├── main.rs           # Entry point and CLI args
+├── lib.rs            # Library exports
+├── app.rs            # Application state and key handling
+├── model/
+│   ├── log_entry.rs  # Log entry (raw text + optional timestamp)
+│   ├── filter.rs     # Filter/FilterGroup/FilterSet with OR/AND logic
+│   └── timestamp.rs  # Timestamp detection from log lines
+├── storage/
+│   └── loader.rs     # Log file loading
+└── ui/
+    └── mod.rs        # TUI rendering (filter bar, log list, status)
 ```
 
 ## Testing
@@ -81,9 +97,9 @@ cargo test
 ```
 
 Tests cover:
-- Log entry parsing from JSON
-- Filter matching logic
-- Date range handling
+- Filter matching logic (OR within groups, AND between groups)
+- Case-insensitive text matching
+- Timestamp detection from various formats
 - Log loading from files
 
 ## Performance
