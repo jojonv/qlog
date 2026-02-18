@@ -4,8 +4,8 @@ A TUI (Terminal User Interface) application for viewing and filtering como-data-
 
 ## Features
 
-- **Unified Log View**: Merge all 30 como-data-center log files chronologically
-- **Flexible Filtering**: Apply/Remove multiple filters (Level, Text, Date Range, Source)
+- **Unified Log View**: Merge all log files chronologically
+- **Flexible Filtering**: Apply/Remove multiple filters
 - **Helix Keybindings**: Navigation using hjkl, gg/G for goto top/bottom
 - **Color Coding**: Errors (Red), Warnings (Yellow), Information (Green)
 - **Async Loading**: Efficient memory-mapped file loading for large datasets
@@ -24,11 +24,11 @@ The binary will be at `target/release/como-log-viewer`.
 ## Usage
 
 ```bash
-# Automatically find como-data-center*.log files in current directory
+# Automatically find *.log files in current directory
 ./como-log-viewer
 
 # Or specify specific log files
-./como-log-viewer /path/to/como-data-center*.log
+./como-log-viewer /path/to/*.log
 ```
 
 ## Keybindings
