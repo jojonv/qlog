@@ -182,55 +182,54 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut entries_to_take = 0usize;
     let mut total_visual_lines = 0usize;
 
-    for entry in app.filtered_logs.iter().skip(app.scroll_offset) {
-        let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
-        let text_width = ts_len + entry.raw.chars().count();
+    for idx in app.scroll_offset..app.filtered_len() {
+        if let Some(entry) = app.get_filtered_entry(idx) {
+            let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
+            let text_width = ts_len + entry.raw.chars().count();
 
-        let visual_lines = if app.wrap_mode {
-            count_visual_lines(text_width, viewport_width)
-        } else {
-            1
-        };
+            let visual_lines = if app.wrap_mode {
+                count_visual_lines(text_width, viewport_width)
+            } else {
+                1
+            };
 
-        if total_visual_lines + visual_lines > content_height {
-            break;
+            if total_visual_lines + visual_lines > content_height {
+                break;
+            }
+
+            total_visual_lines += visual_lines;
+            entries_to_take += 1;
         }
-
-        total_visual_lines += visual_lines;
-        entries_to_take += 1;
     }
 
     // Ensure we take at least 1 entry if there are any
-    if entries_to_take == 0 && app.filtered_logs.len() > app.scroll_offset {
+    if entries_to_take == 0 && app.filtered_len() > app.scroll_offset {
         entries_to_take = 1;
     }
 
-    let log_lines: Vec<Line> = app
-        .filtered_logs
-        .iter()
-        .skip(app.scroll_offset)
-        .take(entries_to_take)
-        .enumerate()
-        .map(|(idx, entry)| {
-            let is_selected = app.scroll_offset + idx == app.selected_line;
-            let base_style = if is_selected {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                Style::default()
-            };
+    let log_lines: Vec<Line> = (app.scroll_offset..app.scroll_offset + entries_to_take)
+        .filter_map(|idx| {
+            app.get_filtered_entry(idx).map(|entry| {
+                let is_selected = idx == app.selected_line;
+                let base_style = if is_selected {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
 
-            let mut spans = Vec::new();
+                let mut spans = Vec::new();
 
-            if let Some(ts) = &entry.timestamp {
-                spans.push(Span::styled(
-                    ts.format("%Y-%m-%d %H:%M:%S ").to_string(),
-                    base_style.fg(Color::Cyan),
-                ));
-            }
+                if let Some(ts) = &entry.timestamp {
+                    spans.push(Span::styled(
+                        ts.format("%Y-%m-%d %H:%M:%S ").to_string(),
+                        base_style.fg(Color::Cyan),
+                    ));
+                }
 
-            spans.push(Span::styled(&entry.raw, base_style));
+                spans.push(Span::styled(&entry.raw, base_style));
 
-            Line::from(spans)
+                Line::from(spans)
+            })
         })
         .collect();
 
@@ -238,7 +237,7 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let title = format!(
         "Logs ({} total, {} filtered) {} [max:{} vw:{}]",
         app.logs.len(),
-        app.filtered_logs.len(),
+        app.filtered_len(),
         wrap_indicator,
         app.max_line_width,
         inner_area.width
@@ -255,7 +254,7 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     frame.render_widget(main_view, area);
 
     // Fast scrollbar calculation - use entry counts, not visual lines
-    let total_entries = app.filtered_logs.len();
+    let total_entries = app.filtered_len();
     let scroll_position = app.scroll_offset;
 
     let show_vertical = total_entries > content_height;
@@ -330,7 +329,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             "[{}] Line {}/{} | {}",
             mode_name,
             app.selected_line + 1,
-            app.filtered_logs.len(),
+            app.filtered_len(),
             help_text
         )
     } else {

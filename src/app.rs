@@ -26,7 +26,7 @@ pub enum LoadingStatus {
 #[derive(Debug)]
 pub struct App {
     pub logs: Vec<LogEntry>,
-    pub filtered_logs: Vec<LogEntry>,
+    pub filtered_indices: Vec<usize>,
     pub filters: FilterSet,
     pub mode: Mode,
     pub should_quit: bool,
@@ -52,7 +52,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             logs: Vec::new(),
-            filtered_logs: Vec::new(),
+            filtered_indices: Vec::new(),
             filters: FilterSet::new(),
             mode: Mode::Normal,
             should_quit: false,
@@ -73,6 +73,16 @@ impl App {
             visual_line_offsets: Vec::new(),
             total_visual_lines: 0,
         }
+    }
+
+    pub fn filtered_len(&self) -> usize {
+        self.filtered_indices.len()
+    }
+
+    pub fn get_filtered_entry(&self, idx: usize) -> Option<&LogEntry> {
+        self.filtered_indices
+            .get(idx)
+            .and_then(|&log_idx| self.logs.get(log_idx))
     }
 
     pub fn start_loading(&mut self) -> Sender<Vec<LogEntry>> {
@@ -110,11 +120,12 @@ impl App {
     }
 
     pub fn update_filtered_logs(&mut self) {
-        self.filtered_logs = self
+        self.filtered_indices = self
             .logs
             .iter()
-            .filter(|entry| self.filters.matches(entry))
-            .cloned()
+            .enumerate()
+            .filter(|(_, entry)| self.filters.matches(entry))
+            .map(|(idx, _)| idx)
             .collect();
         self.recalculate_max_line_width();
         self.recalculate_visual_lines();
@@ -122,8 +133,9 @@ impl App {
 
     pub fn recalculate_max_line_width(&mut self) {
         self.max_line_width = self
-            .filtered_logs
+            .filtered_indices
             .iter()
+            .filter_map(|&idx| self.logs.get(idx))
             .map(|entry| {
                 let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
                 ts_len + entry.raw.chars().count()
@@ -134,7 +146,7 @@ impl App {
 
     pub fn recalculate_visual_lines(&mut self) {
         self.visual_line_offsets.clear();
-        if self.filtered_logs.is_empty() {
+        if self.filtered_indices.is_empty() {
             self.total_visual_lines = 0;
             return;
         }
@@ -142,16 +154,18 @@ impl App {
         let viewport_width = self.viewport_width.get();
         let mut offset = 0usize;
 
-        for entry in &self.filtered_logs {
-            self.visual_line_offsets.push(offset);
-            let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
-            let text_width = ts_len + entry.raw.chars().count();
-            let visual_lines = if self.wrap_mode && viewport_width > 0 {
-                ((text_width + viewport_width - 1) / viewport_width).max(1)
-            } else {
-                1
-            };
-            offset += visual_lines;
+        for &idx in &self.filtered_indices {
+            if let Some(entry) = self.logs.get(idx) {
+                self.visual_line_offsets.push(offset);
+                let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
+                let text_width = ts_len + entry.raw.chars().count();
+                let visual_lines = if self.wrap_mode && viewport_width > 0 {
+                    ((text_width + viewport_width - 1) / viewport_width).max(1)
+                } else {
+                    1
+                };
+                offset += visual_lines;
+            }
         }
         self.total_visual_lines = offset;
     }
@@ -333,9 +347,11 @@ impl App {
     fn write_filtered_logs(&self, filename: &str) -> io::Result<usize> {
         let mut file = File::create(filename)?;
         let mut count = 0;
-        for entry in &self.filtered_logs {
-            writeln!(file, "{}", entry.raw)?;
-            count += 1;
+        for &idx in &self.filtered_indices {
+            if let Some(entry) = self.logs.get(idx) {
+                writeln!(file, "{}", entry.raw)?;
+                count += 1;
+            }
         }
         Ok(count)
     }
@@ -347,7 +363,7 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.status_message.clear();
-                if self.selected_line < self.filtered_logs.len().saturating_sub(1) {
+                if self.selected_line < self.filtered_len().saturating_sub(1) {
                     self.selected_line += 1;
                 }
                 self.clamp_scroll();
@@ -364,7 +380,7 @@ impl App {
                 self.horizontal_scroll = self.horizontal_scroll.saturating_sub(4);
             }
             KeyCode::Char('G') => {
-                self.selected_line = self.filtered_logs.len().saturating_sub(1);
+                self.selected_line = self.filtered_len().saturating_sub(1);
                 self.clamp_scroll();
             }
             KeyCode::Char('g') if key.modifiers.contains(crossterm::event::KeyModifiers::NONE) => {
@@ -392,13 +408,13 @@ impl App {
     }
 
     fn clamp_scroll(&mut self) {
-        if self.filtered_logs.is_empty() {
+        if self.filtered_indices.is_empty() {
             return;
         }
 
         self.selected_line = self
             .selected_line
-            .min(self.filtered_logs.len().saturating_sub(1));
+            .min(self.filtered_len().saturating_sub(1));
 
         let viewport_height = self.viewport_height.get();
 
