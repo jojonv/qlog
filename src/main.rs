@@ -13,7 +13,11 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use walkdir::WalkDir;
 
-use como_log_viewer::{app::App, model::LogEntry, storage::loader::LogLoader};
+use como_log_viewer::{
+    app::{App, LoadingStatus},
+    model::LogStorage,
+    storage::loader::LogLoader,
+};
 
 const DEFAULT_MAX_OPEN_DIRS: usize = 10;
 const MMAP_THRESHOLD: u64 = 10 * 1024 * 1024;
@@ -27,8 +31,10 @@ fn get_max_open_dirs() -> usize {
         .unwrap_or(DEFAULT_MAX_OPEN_DIRS)
 }
 
-fn is_fd_exhaustion_error(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(24) | Some(23))
+fn is_fd_exhaustion_error(e: &(dyn std::error::Error + 'static)) -> bool {
+    e.downcast_ref::<io::Error>()
+        .map(|e| matches!(e.raw_os_error(), Some(24) | Some(23)))
+        .unwrap_or(false)
 }
 
 fn get_fd_limit() -> Option<usize> {
@@ -91,42 +97,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (progress_tx, progress_rx): (mpsc::Sender<LoadProgress>, mpsc::Receiver<LoadProgress>) =
         mpsc::channel();
     let (logs_tx, logs_rx): (
-        mpsc::Sender<(Vec<LogEntry>, LoadStats)>,
-        mpsc::Receiver<(Vec<LogEntry>, LoadStats)>,
+        mpsc::Sender<(LogStorage, LoadStats)>,
+        mpsc::Receiver<(LogStorage, LoadStats)>,
     ) = mpsc::channel();
-    let (incremental_tx, incremental_rx): (
-        mpsc::Sender<Vec<LogEntry>>,
-        mpsc::Receiver<Vec<LogEntry>>,
-    ) = mpsc::channel();
+    let (incremental_tx, incremental_rx): (mpsc::Sender<LogStorage>, mpsc::Receiver<LogStorage>) =
+        mpsc::channel();
 
     let args_clone = args.clone();
     thread::spawn(move || {
-        let loader = LogLoader::new();
-        let mut all_logs = Vec::new();
+        let loader = LogLoader::new(0); // Will be updated with actual count
+        let mut all_storages: Vec<LogStorage> = Vec::new();
         let mut stats = LoadStats::default();
         let mut file_count = 0usize;
 
-        let paths: Box<dyn Iterator<Item = PathBuf>> = if args_clone.len() > 1 {
-            Box::new(collect_paths_streaming(&args_clone[1..], max_open_dirs))
+        // First pass: collect all paths
+        let paths: Vec<PathBuf> = if args_clone.len() > 1 {
+            collect_paths(&args_clone[1..], max_open_dirs)
         } else {
-            Box::new(
-                WalkDir::new(".")
-                    .max_open(max_open_dirs)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                    .map(|e| e.path().to_path_buf())
-                    .filter(|p| is_log_file(p)),
-            )
+            WalkDir::new(".")
+                .max_open(max_open_dirs)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.path().to_path_buf())
+                .filter(|p| is_log_file(p))
+                .collect()
         };
+
+        let total_files = paths.len();
+
+        // Send progress with total count
+        let _ = progress_tx.send(LoadProgress {
+            current_file: 0,
+            total_files,
+            entries_loaded: 0,
+            current_path: None,
+        });
 
         for path in paths {
             file_count += 1;
 
             let progress = LoadProgress {
                 current_file: file_count,
-                total_files: 0,
-                entries_loaded: all_logs.len(),
+                total_files,
+                entries_loaded: all_storages.iter().map(|s| s.len()).sum(),
                 current_path: Some(path.clone()),
             };
             let _ = progress_tx.send(progress);
@@ -137,18 +151,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut delay = INITIAL_RETRY_MS;
 
             loop {
-                match loader.load_file_with_mmap(&path, &mut all_logs, MMAP_THRESHOLD) {
-                    Ok(count) => {
+                match LogStorage::from_file(&path) {
+                    Ok(storage) => {
+                        let entry_count = storage.len();
                         stats.files_loaded += 1;
-                        stats.entries_loaded += count;
+                        stats.entries_loaded += entry_count;
 
-                        if all_logs.len() >= 100 {
-                            let chunk: Vec<LogEntry> = all_logs.drain(..).collect();
-                            let _ = incremental_tx.send(chunk);
-                        }
+                        // Store for later combination
+                        all_storages.push(storage);
                         break;
                     }
-                    Err(e) if is_fd_exhaustion_error(&e) && attempt < MAX_RETRIES => {
+                    Err(e) if is_fd_exhaustion_error(&*e) && attempt < MAX_RETRIES => {
                         eprintln!(
                             "FD exhaustion on {}, retry {}/{} after {}ms",
                             path.display(),
@@ -160,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         delay *= 2;
                         attempt += 1;
                     }
-                    Err(e) if is_fd_exhaustion_error(&e) => {
+                    Err(e) if is_fd_exhaustion_error(&*e) => {
                         eprintln!(
                             "Failed to load {} after {} retries: FD limit reached. Try: ulimit -n 65536",
                             path.display(),
@@ -184,11 +197,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if !all_logs.is_empty() {
-            let _ = incremental_tx.send(all_logs);
-        }
+        // Combine all storages into one
+        let combined_storage = combine_storages(all_storages);
 
-        let _ = logs_tx.send((Vec::new(), stats));
+        let _ = logs_tx.send((combined_storage, stats));
     });
 
     enable_raw_mode()?;
@@ -221,39 +233,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn collect_paths_streaming(args: &[String], max_open_dirs: usize) -> impl Iterator<Item = PathBuf> {
-    let dirs: Vec<String> = args.to_vec();
+/// Combine multiple LogStorage instances into one.
+fn combine_storages(storages: Vec<LogStorage>) -> LogStorage {
+    LogStorage::merge(storages)
+}
 
-    dirs.into_iter().flat_map(move |arg| {
-        let path = PathBuf::from(&arg);
+fn collect_paths(args: &[String], max_open_dirs: usize) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    for arg in args {
+        let path = PathBuf::from(arg);
         if path.is_dir() {
-            WalkDir::new(&path)
-                .max_open(max_open_dirs)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .map(|e| e.path().to_path_buf())
-                .filter(|p| is_log_file(p))
-                .collect::<Vec<_>>()
-                .into_iter()
+            paths.extend(
+                WalkDir::new(&path)
+                    .max_open(max_open_dirs)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.path().to_path_buf())
+                    .filter(|p| is_log_file(p)),
+            );
         } else if arg.contains('*') || arg.contains('?') {
             let pattern = arg.clone();
-            WalkDir::new(".")
-                .max_open(max_open_dirs)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .map(|e| e.path().to_path_buf())
-                .filter(move |p| matches_glob_pattern(p, &pattern))
-                .collect::<Vec<_>>()
-                .into_iter()
+            paths.extend(
+                WalkDir::new(".")
+                    .max_open(max_open_dirs)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.path().to_path_buf())
+                    .filter(|p| matches_glob_pattern(p, &pattern)),
+            );
         } else if path.exists() {
-            vec![path].into_iter()
+            paths.push(path);
         } else {
             eprintln!("Warning: {} not found, skipping", arg);
-            Vec::new().into_iter()
         }
-    })
+    }
+
+    paths
 }
 
 fn matches_glob_pattern(path: &Path, pattern: &str) -> bool {
@@ -304,8 +322,8 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     progress_rx: mpsc::Receiver<LoadProgress>,
-    logs_rx: mpsc::Receiver<(Vec<LogEntry>, LoadStats)>,
-    incremental_rx: mpsc::Receiver<Vec<LogEntry>>,
+    logs_rx: mpsc::Receiver<(LogStorage, LoadStats)>,
+    incremental_rx: mpsc::Receiver<LogStorage>,
 ) -> io::Result<()> {
     let mut last_tick = std::time::Instant::now();
     let tick_rate = Duration::from_millis(50);
@@ -313,7 +331,7 @@ fn run_app(
 
     while !app.should_quit {
         while let Ok(progress) = progress_rx.try_recv() {
-            app.loading_status = como_log_viewer::app::LoadingStatus::Loading {
+            app.loading_status = LoadingStatus::Loading {
                 current: progress.current_file,
                 total: if progress.total_files > 0 {
                     progress.total_files
@@ -323,14 +341,14 @@ fn run_app(
             };
         }
 
-        while let Ok(logs) = incremental_rx.try_recv() {
-            app.extend_logs(logs);
-            app.update_filtered_logs();
+        while let Ok(storage) = incremental_rx.try_recv() {
+            app.set_storage(storage);
         }
 
-        if let Ok((_, final_stats)) = logs_rx.try_recv() {
+        if let Ok((final_storage, final_stats)) = logs_rx.try_recv() {
             stats = Some(final_stats);
-            app.loading_status = como_log_viewer::app::LoadingStatus::Complete;
+            app.loading_status = LoadingStatus::Complete;
+            app.set_storage(final_storage);
         }
 
         if let Some(ref s) = stats {

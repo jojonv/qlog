@@ -1,13 +1,13 @@
 use crate::app::{App, LoadingStatus, Mode};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Margin},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
 
-/// Calculate how many visual lines an entry will occupy when wrapped
+/// Calculate how many visual lines a text will occupy when wrapped.
 fn count_visual_lines(text_width: usize, viewport_width: usize) -> usize {
     if viewport_width == 0 || text_width == 0 {
         return 1;
@@ -16,9 +16,13 @@ fn count_visual_lines(text_width: usize, viewport_width: usize) -> usize {
     ((text_width + viewport_width - 1) / viewport_width).max(1)
 }
 
-pub fn draw(frame: &mut Frame, app: &App) {
+/// Main draw function that routes to appropriate screen based on app state.
+pub fn draw(frame: &mut Frame, app: &mut App) {
+    // Check for loaded logs first
+    app.check_for_loaded_logs();
+
     if let LoadingStatus::Loading { current, total } = &app.loading_status {
-        draw_loading_screen(frame, *current, *total, app.logs.len());
+        draw_loading_screen(frame, *current, *total, app.total_lines());
         return;
     }
 
@@ -74,12 +78,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_filter_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut spans: Vec<Span> = Vec::new();
 
-    for (gi, group) in app.filters.groups.iter().enumerate() {
+    for (gi, group) in app.filters.groups().iter().enumerate() {
         if gi > 0 {
             spans.push(Span::styled(" | ", Style::default().fg(Color::Yellow)));
         }
 
-        if group.filters.is_empty() {
+        if group.filters().is_empty() {
             let is_selected = app.mode == Mode::Filter && app.selected_group == gi;
             let style = if is_selected {
                 Style::default()
@@ -90,7 +94,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             };
             spans.push(Span::styled("(empty)", style));
         } else {
-            for (fi, filter) in group.filters.iter().enumerate() {
+            for (fi, filter) in group.filters().iter().enumerate() {
                 if fi > 0 {
                     spans.push(Span::styled(" OR ", Style::default().fg(Color::Green)));
                 }
@@ -99,7 +103,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     && app.selected_group == gi
                     && app.selected_filter == fi;
 
-                let base_style = if filter.enabled {
+                let base_style = if filter.enabled() {
                     Style::default().fg(Color::Cyan)
                 } else {
                     Style::default()
@@ -115,13 +119,13 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     base_style
                 };
 
-                let prefix = if filter.enabled { "" } else { "⊘ " };
-                spans.push(Span::styled(format!("{}{}", prefix, filter.text), style));
+                let prefix = if filter.enabled() { "" } else { "⊘ " };
+                spans.push(Span::styled(format!("{}{}", prefix, filter.text()), style));
             }
         }
     }
 
-    if app.filters.groups.is_empty() {
+    if app.filters.groups().is_empty() {
         spans.push(Span::styled(
             "No filters (press 'f' to add)",
             Style::default().fg(Color::DarkGray),
@@ -167,8 +171,8 @@ fn draw_command_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
     frame.render_widget(input_box, area);
 }
 
-fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let inner_area = area.inner(&ratatui::layout::Margin {
+fn draw_main_view(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let inner_area = area.inner(&Margin {
         vertical: 1,
         horizontal: 1,
     });
@@ -178,14 +182,24 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     app.viewport_height.set(content_height);
     app.viewport_width.set(viewport_width);
 
+    // Update visual cache viewport settings
+    if app.visual_cache().viewport_width() != viewport_width {
+        app.visual_cache_mut().set_viewport_width(viewport_width);
+    }
+
     // Calculate how many entries fit in the viewport, accounting for wrap mode
     let mut entries_to_take = 0usize;
     let mut total_visual_lines = 0usize;
 
     for idx in app.scroll_offset..app.filtered_len() {
-        if let Some(entry) = app.get_filtered_entry(idx) {
-            let ts_len = entry.timestamp.as_ref().map(|_| 20).unwrap_or(0);
-            let text_width = ts_len + entry.raw.chars().count();
+        if let Some(mmap_str) = app.get_filtered_entry(idx) {
+            let text = mmap_str.as_str_lossy();
+            let ts_len = app
+                .get_filtered_timestamp(idx)
+                .as_ref()
+                .map(|_| 20)
+                .unwrap_or(0);
+            let text_width = ts_len + text.chars().count();
 
             let visual_lines = if app.wrap_mode {
                 count_visual_lines(text_width, viewport_width)
@@ -209,7 +223,7 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     let log_lines: Vec<Line> = (app.scroll_offset..app.scroll_offset + entries_to_take)
         .filter_map(|idx| {
-            app.get_filtered_entry(idx).map(|entry| {
+            app.get_filtered_entry(idx).map(|mmap_str| {
                 let is_selected = idx == app.selected_line;
                 let base_style = if is_selected {
                     Style::default().bg(Color::DarkGray)
@@ -219,27 +233,46 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
                 let mut spans = Vec::new();
 
-                if let Some(ts) = &entry.timestamp {
+                // Add timestamp if available
+                if let Some(ts) = app.get_filtered_timestamp(idx) {
                     spans.push(Span::styled(
                         ts.format("%Y-%m-%d %H:%M:%S ").to_string(),
                         base_style.fg(Color::Cyan),
                     ));
                 }
 
-                spans.push(Span::styled(&entry.raw, base_style));
+                // Add the log line text (lossy UTF-8 conversion at display time)
+                spans.push(Span::styled(
+                    mmap_str.as_str_lossy().to_string(),
+                    base_style,
+                ));
 
                 Line::from(spans)
             })
         })
         .collect();
 
+    // Calculate approximate max line width for scrollbar
+    let max_line_width = if let Some(storage) = &app.storage {
+        storage
+            .iter()
+            .take(1000) // Sample first 1000 lines
+            .map(|mmap_str| {
+                let text = mmap_str.as_str_lossy();
+                text.chars().count()
+            })
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     let wrap_indicator = if app.wrap_mode { "[WRAP]" } else { "[nowrap]" };
     let title = format!(
-        "Logs ({} total, {} filtered) {} [max:{} vw:{}]",
-        app.logs.len(),
+        "Logs ({} total, {} filtered) {} [vw:{}]",
+        app.total_lines(),
         app.filtered_len(),
         wrap_indicator,
-        app.max_line_width,
         inner_area.width
     );
 
@@ -258,7 +291,7 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let scroll_position = app.scroll_offset;
 
     let show_vertical = total_entries > content_height;
-    let show_horizontal = !app.wrap_mode && app.max_line_width > viewport_width;
+    let show_horizontal = !app.wrap_mode && max_line_width > viewport_width;
 
     if show_vertical {
         let vertical_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -291,7 +324,7 @@ fn draw_main_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .track_symbol(Some("─"))
             .end_symbol(Some("►"));
 
-        let mut h_scroll_state = ScrollbarState::new(app.max_line_width)
+        let mut h_scroll_state = ScrollbarState::new(max_line_width)
             .viewport_content_length(viewport_width)
             .position(app.horizontal_scroll);
 

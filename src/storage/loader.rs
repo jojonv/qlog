@@ -1,16 +1,9 @@
-use crate::model::{detect_timestamp, LogEntry};
-use memmap2::Mmap;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-#[allow(dead_code)]
-pub struct LogLoader {
-    loaded_count: Mutex<usize>,
-    total_files: usize,
-}
+use crate::model::LogStorage;
 
+/// Statistics about the loading process.
 #[derive(Debug, Clone)]
 pub struct LoadStat {
     pub total_files: usize,
@@ -18,114 +11,105 @@ pub struct LoadStat {
     pub total_lines: usize,
 }
 
+/// Handles loading of log files using memory-mapped storage.
+pub struct LogLoader {
+    /// Counter for tracking progress
+    loaded_count: Arc<Mutex<usize>>,
+    /// Total number of files to load
+    total_files: usize,
+}
+
 impl LogLoader {
-    pub fn new() -> Self {
+    /// Create a new LogLoader.
+    pub fn new(total_files: usize) -> Self {
         Self {
-            loaded_count: Mutex::new(0),
-            total_files: 0,
+            loaded_count: Arc::new(Mutex::new(0)),
+            total_files,
         }
     }
 
-    pub fn load_logs(
+    /// Load logs from the given paths into LogStorage instances.
+    /// Returns a vector of LogStorage objects and load statistics.
+    pub fn load_logs<P: AsRef<Path>>(
         &self,
-        logs: &mut Vec<LogEntry>,
-        paths: &[impl AsRef<Path>],
-    ) -> io::Result<LoadStat> {
+        paths: &[P],
+    ) -> Result<(Vec<LogStorage>, LoadStat), Box<dyn std::error::Error>> {
+        let mut storages = Vec::new();
         let mut total_lines = 0;
-        let mut loaded_files = 0;
 
         for path in paths {
-            match self.load_file(path.as_ref(), logs) {
-                Ok(lines) => {
-                    total_lines += lines;
-                    loaded_files += 1;
+            let path = path.as_ref();
+            if !path.exists() {
+                eprintln!("Warning: File not found: {}", path.display());
+                continue;
+            }
+
+            match self.load_file(path) {
+                Ok(storage) => {
+                    total_lines += storage.len();
+                    storages.push(storage);
                 }
                 Err(e) => {
-                    eprintln!("Error loading {}: {}", path.as_ref().display(), e);
+                    eprintln!("Error loading {}: {}", path.display(), e);
                 }
+            }
+
+            // Update progress
+            if let Ok(mut count) = self.loaded_count.lock() {
+                *count += 1;
             }
         }
 
-        logs.sort_by(|a, b| match (&a.timestamp, &b.timestamp) {
-            (Some(ta), Some(tb)) => ta.cmp(tb),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        });
-
-        Ok(LoadStat {
-            total_files: paths.len(),
+        let loaded_files = storages.len();
+        let stat = LoadStat {
+            total_files: self.total_files,
             loaded_files,
             total_lines,
-        })
-    }
-
-    pub fn load_file(&self, path: &Path, logs: &mut Vec<LogEntry>) -> io::Result<usize> {
-        self.load_file_with_mmap(path, logs, u64::MAX)
-    }
-
-    pub fn load_file_with_mmap(
-        &self,
-        path: &Path,
-        logs: &mut Vec<LogEntry>,
-        mmap_threshold: u64,
-    ) -> io::Result<usize> {
-        let file = File::open(path)?;
-        let metadata = file.metadata()?;
-        let file_size = metadata.len();
-
-        let count = if file_size > mmap_threshold {
-            self.load_with_mmap(&file, logs).unwrap_or_else(|_| {
-                drop(file);
-                let file = File::open(path).unwrap();
-                self.load_with_bufreader(file, logs).unwrap_or(0)
-            })
-        } else {
-            self.load_with_bufreader(file, logs)?
         };
 
-        Ok(count)
+        Ok((storages, stat))
     }
 
-    fn load_with_bufreader(&self, file: File, logs: &mut Vec<LogEntry>) -> io::Result<usize> {
-        let reader = BufReader::new(file);
-        let mut count = 0;
-
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                if !line.trim().is_empty() {
-                    let timestamp = detect_timestamp(&line);
-                    logs.push(LogEntry::new(line, timestamp));
-                    count += 1;
-                }
-            }
-        }
-
-        Ok(count)
+    /// Load a single file into a LogStorage.
+    fn load_file<P: AsRef<Path>>(&self, path: P) -> Result<LogStorage, Box<dyn std::error::Error>> {
+        LogStorage::from_file(path)
     }
 
-    fn load_with_mmap(&self, file: &File, logs: &mut Vec<LogEntry>) -> io::Result<usize> {
-        let mmap = unsafe { Mmap::map(file)? };
-        let content = std::str::from_utf8(&mmap)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    /// Get current loading progress.
+    pub fn progress(&self) -> (usize, usize) {
+        let loaded = match self.loaded_count.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        (loaded, self.total_files)
+    }
 
-        let mut count = 0;
-        for line in content.lines() {
-            if !line.trim().is_empty() {
-                let timestamp = detect_timestamp(line);
-                logs.push(LogEntry::new(line.to_string(), timestamp));
-                count += 1;
-            }
-        }
-
-        Ok(count)
+    /// Check if loading is complete.
+    pub fn is_complete(&self) -> bool {
+        let loaded = match self.loaded_count.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        loaded >= self.total_files
     }
 }
 
-impl Default for LogLoader {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Create a LogLoader for the given paths.
+pub fn create_loader<P: AsRef<Path>>(paths: &[P]) -> LogLoader {
+    LogLoader::new(paths.len())
+}
+
+/// Load logs from a single file.
+pub fn load_single_file<P: AsRef<Path>>(path: P) -> Result<LogStorage, Box<dyn std::error::Error>> {
+    LogStorage::from_file(path)
+}
+
+/// Load logs from multiple files.
+pub fn load_multiple_files<P: AsRef<Path>>(
+    paths: &[P],
+) -> Result<(Vec<LogStorage>, LoadStat), Box<dyn std::error::Error>> {
+    let loader = create_loader(paths);
+    loader.load_logs(paths)
 }
 
 #[cfg(test)]
@@ -135,45 +119,48 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_load_file_with_timestamp() {
+    fn test_load_single_file() {
         let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "2026-02-13T10:00:00Z This is a log message").unwrap();
+        writeln!(temp_file, "Line 1").unwrap();
+        writeln!(temp_file, "Line 2").unwrap();
+        writeln!(temp_file, "Line 3").unwrap();
 
-        let loader = LogLoader::new();
-        let mut logs = Vec::new();
-        let lines = loader.load_file(temp_file.path(), &mut logs).unwrap();
+        let storage = load_single_file(temp_file.path()).unwrap();
 
-        assert_eq!(lines, 1);
-        assert_eq!(logs.len(), 1);
-        assert!(logs[0].timestamp.is_some());
+        assert_eq!(storage.len(), 3);
+        assert_eq!(storage.get_line(0).unwrap().as_str_lossy().trim(), "Line 1");
     }
 
     #[test]
-    fn test_load_file_without_timestamp() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "This is a log message without timestamp").unwrap();
+    fn test_load_multiple_files() {
+        let mut temp_file1 = NamedTempFile::new().unwrap();
+        writeln!(temp_file1, "File1 Line1").unwrap();
+        writeln!(temp_file1, "File1 Line2").unwrap();
 
-        let loader = LogLoader::new();
-        let mut logs = Vec::new();
-        let lines = loader.load_file(temp_file.path(), &mut logs).unwrap();
+        let mut temp_file2 = NamedTempFile::new().unwrap();
+        writeln!(temp_file2, "File2 Line1").unwrap();
 
-        assert_eq!(lines, 1);
-        assert_eq!(logs.len(), 1);
-        assert!(logs[0].timestamp.is_none());
+        let paths = vec![temp_file1.path(), temp_file2.path()];
+        let (storages, stat) = load_multiple_files(&paths).unwrap();
+
+        assert_eq!(storages.len(), 2);
+        assert_eq!(stat.total_files, 2);
+        assert_eq!(stat.loaded_files, 2);
+        assert_eq!(stat.total_lines, 3); // 2 + 1
+
+        assert_eq!(storages[0].len(), 2);
+        assert_eq!(storages[1].len(), 1);
     }
 
     #[test]
-    fn test_load_file_with_mmap_small() {
+    fn test_loader_progress() {
         let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "2026-02-13T10:00:00Z Small file").unwrap();
+        writeln!(temp_file, "Test").unwrap();
 
-        let loader = LogLoader::new();
-        let mut logs = Vec::new();
-        let lines = loader
-            .load_file_with_mmap(temp_file.path(), &mut logs, 1024 * 1024)
-            .unwrap();
+        let loader = LogLoader::new(1);
+        assert_eq!(loader.progress(), (0, 1));
 
-        assert_eq!(lines, 1);
-        assert_eq!(logs.len(), 1);
+        let _ = loader.load_file(temp_file.path());
+        // Progress updated during load
     }
 }
