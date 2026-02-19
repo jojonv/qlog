@@ -1,10 +1,101 @@
-/// A single filter with cached lowercase bytes for zero-allocation matching.
+/// Boyer-Moore-Horspool string matcher for fast substring search.
+/// Uses O(m) preprocessing and O(n/m) average-case search time.
+#[derive(Debug, Clone)]
+pub struct BMHMatcher {
+    /// The pattern to search for (lowercase bytes)
+    pattern: Vec<u8>,
+    /// Skip table: for each byte value, stores how far to shift
+    skip_table: [usize; 256],
+    /// Pattern length (cached for performance)
+    pattern_len: usize,
+}
+
+impl BMHMatcher {
+    /// Create a new BMH matcher for the given pattern.
+    /// Pattern should already be in lowercase for case-insensitive matching.
+    pub fn new(pattern: Vec<u8>) -> Self {
+        let pattern_len = pattern.len();
+        let mut skip_table = [pattern_len; 256];
+
+        // Build skip table: for each byte in pattern (except last),
+        // set the skip distance to the distance from the end
+        if pattern_len > 0 {
+            for i in 0..pattern_len - 1 {
+                skip_table[pattern[i] as usize] = pattern_len - 1 - i;
+            }
+        }
+
+        Self {
+            pattern,
+            skip_table,
+            pattern_len,
+        }
+    }
+
+    /// Find the pattern in the given text using BMH algorithm.
+    /// Returns the starting position if found, None otherwise.
+    /// Text should be converted to lowercase for case-insensitive matching.
+    pub fn find(&self, text: &[u8]) -> Option<usize> {
+        if self.pattern_len == 0 {
+            return Some(0);
+        }
+
+        if self.pattern_len > text.len() {
+            return None;
+        }
+
+        // Special case for single character patterns
+        if self.pattern_len == 1 {
+            let byte = self.pattern[0];
+            for (i, &text_byte) in text.iter().enumerate() {
+                if text_byte == byte {
+                    return Some(i);
+                }
+            }
+            return None;
+        }
+
+        let mut pos = self.pattern_len - 1;
+        let last = self.pattern_len - 1;
+
+        while pos < text.len() {
+            // Check if pattern matches at current position
+            let mut i = self.pattern_len;
+            while i > 0 {
+                i -= 1;
+                if text[pos - (self.pattern_len - 1 - i)] != self.pattern[i] {
+                    break;
+                }
+            }
+
+            if i == 0 {
+                // Found match
+                return Some(pos - last);
+            }
+
+            // Shift by skip table value for the character at current position
+            let shift = self.skip_table[text[pos] as usize];
+            pos += shift;
+        }
+
+        None
+    }
+
+    /// Check if pattern exists in text.
+    pub fn contains(&self, text: &[u8]) -> bool {
+        self.find(text).is_some()
+    }
+}
+
+/// A single filter with cached lowercase bytes and BMH matcher for zero-allocation matching.
 #[derive(Debug, Clone)]
 pub struct Filter {
     /// Original filter text (for display/editing)
     text: String,
     /// Cached lowercase bytes for fast matching
     cached_lower: Vec<u8>,
+    /// BMH matcher for optimized pattern matching
+    matcher: BMHMatcher,
     /// Whether this filter is enabled
     enabled: bool,
 }
@@ -14,9 +105,11 @@ impl Filter {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
         let cached_lower = Self::to_lower_bytes(&text);
+        let matcher = BMHMatcher::new(cached_lower.clone());
         Self {
             text,
             cached_lower,
+            matcher,
             enabled: true,
         }
     }
@@ -25,9 +118,11 @@ impl Filter {
     pub fn with_enabled(text: impl Into<String>, enabled: bool) -> Self {
         let text = text.into();
         let cached_lower = Self::to_lower_bytes(&text);
+        let matcher = BMHMatcher::new(cached_lower.clone());
         Self {
             text,
             cached_lower,
+            matcher,
             enabled,
         }
     }
@@ -64,6 +159,7 @@ impl Filter {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cached_lower = Self::to_lower_bytes(&self.text);
+        self.matcher = BMHMatcher::new(self.cached_lower.clone());
     }
 
     /// Check if the filter is enabled.
@@ -82,7 +178,7 @@ impl Filter {
     }
 
     /// Check if the filter matches the given line bytes.
-    /// Uses ASCII lowercase byte comparison - zero allocation.
+    /// Uses Boyer-Moore-Horspool algorithm with ASCII lowercase byte comparison - zero allocation.
     pub fn matches(&self, line_bytes: &[u8]) -> bool {
         if !self.enabled || self.cached_lower.is_empty() {
             return true;
@@ -93,27 +189,59 @@ impl Filter {
             return false;
         }
 
-        // Boyer-Moore-Horspool style search with ASCII lowercase
-        let pattern = &self.cached_lower;
-        let pattern_len = pattern.len();
-        let text_len = line_bytes.len();
+        // Convert line to lowercase in-place for comparison
+        // This avoids allocation by doing case folding on the fly
+        // We use a simple approach: compare each byte after lowercasing
+        let pattern_len = self.cached_lower.len();
 
         if pattern_len == 0 {
             return true;
         }
 
-        // Simple sliding window search
-        for i in 0..=text_len - pattern_len {
-            let mut matches = true;
-            for j in 0..pattern_len {
-                if Self::ascii_lower(line_bytes[i + j]) != pattern[j] {
-                    matches = false;
+        // Use BMH matcher for O(n/m) average-case performance
+        // Convert text to lowercase on-the-fly during comparison
+        self.bmh_search_lowercase(line_bytes)
+    }
+
+    /// Perform BMH search with on-the-fly lowercase conversion.
+    /// Avoids allocating a lowercase version of the entire line.
+    fn bmh_search_lowercase(&self, text: &[u8]) -> bool {
+        if self.cached_lower.is_empty() {
+            return true;
+        }
+
+        if self.cached_lower.len() > text.len() {
+            return false;
+        }
+
+        let pattern = &self.cached_lower;
+        let pattern_len = pattern.len();
+        let text_len = text.len();
+        let last = pattern_len - 1;
+
+        // Get skip table from matcher
+        let skip_table = &self.matcher.skip_table;
+
+        let mut pos = last;
+        while pos < text_len {
+            // Check if pattern matches at current position (with lowercase conversion)
+            let mut i = pattern_len;
+            while i > 0 {
+                i -= 1;
+                let text_byte = Self::ascii_lower(text[pos - (pattern_len - 1 - i)]);
+                if text_byte != pattern[i] {
                     break;
                 }
             }
-            if matches {
+
+            if i == 0 {
+                // Found match
                 return true;
             }
+
+            // Shift by skip table value for the character at current position
+            let shift = skip_table[Self::ascii_lower(text[pos]) as usize] as usize;
+            pos += shift;
         }
 
         false
@@ -313,6 +441,58 @@ impl Default for FilterSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bmh_matcher_empty_pattern() {
+        let matcher = BMHMatcher::new(vec![]);
+        assert_eq!(matcher.find(b"hello"), Some(0));
+        assert_eq!(matcher.find(b""), Some(0));
+    }
+
+    #[test]
+    fn test_bmh_matcher_single_char() {
+        let matcher = BMHMatcher::new(vec![b'a']);
+        assert_eq!(matcher.find(b"hello"), None);
+        assert_eq!(matcher.find(b"apple"), Some(0));
+        assert_eq!(matcher.find(b"banana"), Some(1));
+        assert_eq!(matcher.find(b"aa"), Some(0));
+    }
+
+    #[test]
+    fn test_bmh_matcher_not_found() {
+        let matcher = BMHMatcher::new(vec![b'x', b'y', b'z']);
+        assert_eq!(matcher.find(b"hello"), None);
+        assert_eq!(matcher.find(b"abc"), None);
+        assert_eq!(matcher.find(b""), None);
+    }
+
+    #[test]
+    fn test_bmh_matcher_multiple_matches() {
+        let matcher = BMHMatcher::new(vec![b'a', b'b']);
+        // Returns first match position
+        assert_eq!(matcher.find(b"ababab"), Some(0));
+        assert_eq!(matcher.find(b"cabcab"), Some(1));
+    }
+
+    #[test]
+    fn test_bmh_matcher_long_pattern() {
+        let pattern: Vec<u8> = (0..100).map(|i| b'a' + (i % 26) as u8).collect();
+        let matcher = BMHMatcher::new(pattern.clone());
+        assert_eq!(matcher.find(&pattern), Some(0));
+
+        let mut text = vec![b'x'; 50];
+        text.extend_from_slice(&pattern);
+        text.extend_from_slice(&[b'x'; 50]);
+        assert_eq!(matcher.find(&text), Some(50));
+    }
+
+    #[test]
+    fn test_bmh_matcher_contains() {
+        let matcher = BMHMatcher::new(vec![b't', b'e', b's', b't']);
+        assert!(matcher.contains(b"this is a test"));
+        assert!(matcher.contains(b"testing"));
+        assert!(!matcher.contains(b"hello world"));
+    }
 
     #[test]
     fn test_filter_matches() {
