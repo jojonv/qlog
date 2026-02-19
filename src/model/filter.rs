@@ -1,5 +1,7 @@
 /// Boyer-Moore-Horspool string matcher for fast substring search.
 /// Uses O(m) preprocessing and O(n/m) average-case search time.
+use std::cell::RefCell;
+
 #[derive(Debug, Clone)]
 pub struct BMHMatcher {
     /// The pattern to search for (lowercase bytes)
@@ -178,7 +180,8 @@ impl Filter {
     }
 
     /// Check if the filter matches the given line bytes.
-    /// Uses Boyer-Moore-Horspool algorithm with ASCII lowercase byte comparison - zero allocation.
+    /// Uses Boyer-Moore-Horspool algorithm with ASCII lowercase byte comparison.
+    /// Pre-lowercases the text into a thread-local buffer for O(n/m) performance.
     pub fn matches(&self, line_bytes: &[u8]) -> bool {
         if !self.enabled || self.cached_lower.is_empty() {
             return true;
@@ -189,62 +192,24 @@ impl Filter {
             return false;
         }
 
-        // Convert line to lowercase in-place for comparison
-        // This avoids allocation by doing case folding on the fly
-        // We use a simple approach: compare each byte after lowercasing
         let pattern_len = self.cached_lower.len();
 
         if pattern_len == 0 {
             return true;
         }
 
-        // Use BMH matcher for O(n/m) average-case performance
-        // Convert text to lowercase on-the-fly during comparison
-        self.bmh_search_lowercase(line_bytes)
-    }
-
-    /// Perform BMH search with on-the-fly lowercase conversion.
-    /// Avoids allocating a lowercase version of the entire line.
-    fn bmh_search_lowercase(&self, text: &[u8]) -> bool {
-        if self.cached_lower.is_empty() {
-            return true;
+        // Use thread-local buffer to avoid allocation
+        // Pre-lowercase the entire line once, then run pure BMH
+        thread_local! {
+            static LOWER_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(8192));
         }
 
-        if self.cached_lower.len() > text.len() {
-            return false;
-        }
-
-        let pattern = &self.cached_lower;
-        let pattern_len = pattern.len();
-        let text_len = text.len();
-        let last = pattern_len - 1;
-
-        // Get skip table from matcher
-        let skip_table = &self.matcher.skip_table;
-
-        let mut pos = last;
-        while pos < text_len {
-            // Check if pattern matches at current position (with lowercase conversion)
-            let mut i = pattern_len;
-            while i > 0 {
-                i -= 1;
-                let text_byte = Self::ascii_lower(text[pos - (pattern_len - 1 - i)]);
-                if text_byte != pattern[i] {
-                    break;
-                }
-            }
-
-            if i == 0 {
-                // Found match
-                return true;
-            }
-
-            // Shift by skip table value for the character at current position
-            let shift = skip_table[Self::ascii_lower(text[pos]) as usize] as usize;
-            pos += shift;
-        }
-
-        false
+        LOWER_BUF.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            buf.clear();
+            buf.extend(line_bytes.iter().map(|&b| Self::ascii_lower(b)));
+            self.matcher.contains(&buf)
+        })
     }
 }
 
