@@ -6,7 +6,7 @@ pub mod mmap_str;
 pub mod timestamp;
 pub mod visual_line_cache;
 
-pub use filter::{Filter, FilterGroup, FilterSet};
+pub use filter::{BMHMatcher, Filter, FilterGroup, FilterSet};
 pub use line_info::LineInfo;
 pub use log_entry::LogEntry;
 pub use log_storage::LogStorage;

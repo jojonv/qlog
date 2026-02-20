@@ -112,6 +112,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "libc",
+ "lru",
  "memmap2",
  "ratatui",
  "rayon",

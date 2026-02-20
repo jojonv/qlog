@@ -1,12 +1,43 @@
-use crate::config::ColorConfig;
-use crate::model::{FilterSet, LogStorage, VisualLineCache};
+use crate::config::AppConfig;
+use crate::model::{BMHMatcher, FilterSet, LogStorage, VisualLineCache};
 use chrono::Local;
 use crossterm::event::KeyCode;
+use lru::LruCache;
 use ratatui::style::Color;
 use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, Write};
+use std::num::NonZeroUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
+
+/// Position of a match for O(1) lookup.
+#[derive(Debug, Clone, Copy)]
+pub struct MatchPosition {
+    /// Index into filtered_indices
+    pub filtered_idx: usize,
+    /// Byte offset in the line
+    pub byte_offset: usize,
+    /// Match length in bytes
+    pub match_len: usize,
+}
+
+/// Search state with LRU cache for line matches.
+#[derive(Debug)]
+pub struct SearchState {
+    /// The search query string (lowercase for case-insensitive matching)
+    pub query: String,
+    /// BMH matcher for efficient searching
+    pub matcher: BMHMatcher,
+    /// Index of the current match in the flattened match list
+    pub current_idx: usize,
+    /// Position of the current match for O(1) lookup
+    pub current_position: Option<MatchPosition>,
+    /// Total number of matches (cached for performance)
+    pub total_matches: usize,
+    /// Cache of matches per line index (filtered_indices index)
+    /// Key: filtered line index, Value: Vec of (byte_start, byte_end)
+    pub match_cache: LruCache<usize, Vec<(usize, usize)>>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -15,6 +46,7 @@ pub enum Mode {
     FilterInput,
     Command,
     DateRange,
+    SearchInput,
 }
 
 #[derive(Debug, Clone)]
@@ -65,8 +97,12 @@ pub struct App {
     pub viewport_width: Cell<usize>,
     /// Cache for visual line calculations
     visual_cache: VisualLineCache,
-    /// Color configuration for log lines
-    pub config: Option<ColorConfig>,
+    /// Application configuration (colors + search)
+    pub config: Option<AppConfig>,
+    /// Current search query string
+    pub search_query: Option<String>,
+    /// Search state with matcher and cache
+    pub search_state: Option<SearchState>,
 }
 
 impl App {
@@ -92,7 +128,9 @@ impl App {
             viewport_height: Cell::new(20),
             viewport_width: Cell::new(viewport_width),
             visual_cache: VisualLineCache::new(10000, viewport_width),
-            config: ColorConfig::load(),
+            config: AppConfig::load(),
+            search_query: None,
+            search_state: None,
         }
     }
 
@@ -124,7 +162,12 @@ impl App {
     ///
     /// Returns `None` if no config is loaded or no pattern matches.
     pub fn get_line_color(&self, line: &str) -> Option<Color> {
-        self.config.as_ref()?.get_line_color(line)
+        self.config.as_ref()?.colors.get_line_color(line)
+    }
+
+    /// Get the search configuration.
+    pub fn search_config(&self) -> Option<&crate::config::SearchConfig> {
+        self.config.as_ref().map(|c| &c.search)
     }
 
     /// Start async loading of logs.
@@ -269,6 +312,36 @@ impl App {
             Mode::Filter => self.handle_filter_key(key),
             Mode::DateRange => {}
             Mode::Normal => self.handle_normal_key(key),
+            Mode::SearchInput => self.handle_search_input_key(key),
+        }
+    }
+
+    fn handle_search_input_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.input_buffer.clear();
+            }
+            KeyCode::Enter => {
+                if self.input_buffer.trim().is_empty() {
+                    // Empty query clears search
+                    self.clear_search();
+                } else {
+                    // Execute search with non-empty query
+                    let query = self.input_buffer.trim().to_string();
+                    self.search_query = Some(query.clone());
+                    self.init_search_state(query);
+                }
+                self.mode = Mode::Normal;
+                self.input_buffer.clear();
+            }
+            KeyCode::Backspace => {
+                self.input_buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                self.input_buffer.push(c);
+            }
+            _ => {}
         }
     }
 
@@ -300,6 +373,7 @@ impl App {
                         .len()
                         .saturating_sub(1);
                     self.update_filtered_logs();
+                    self.clear_search_on_refilter();
                 }
                 self.mode = Mode::Filter;
                 self.input_buffer.clear();
@@ -463,6 +537,16 @@ impl App {
                     "Wrap mode disabled".to_string()
                 };
             }
+            KeyCode::Char('/') => {
+                self.mode = Mode::SearchInput;
+                self.input_buffer.clear();
+            }
+            KeyCode::Char('n') => {
+                self.next_match();
+            }
+            KeyCode::Char('N') => {
+                self.prev_match();
+            }
             _ => {}
         }
     }
@@ -524,6 +608,7 @@ impl App {
                     }
                 }
                 self.update_filtered_logs();
+                self.clear_search_on_refilter();
             }
             KeyCode::Char('d') => {
                 if !self.filters.groups().is_empty() {
@@ -534,6 +619,7 @@ impl App {
                     }
                     self.ensure_valid_selection();
                     self.update_filtered_logs();
+                    self.clear_search_on_refilter();
                 }
             }
             KeyCode::Char('F') => {
@@ -571,6 +657,319 @@ impl App {
     pub fn total_lines(&self) -> usize {
         self.storage.as_ref().map(|s| s.len()).unwrap_or(0)
     }
+
+    /// Clear search when filters change.
+    fn clear_search_on_refilter(&mut self) {
+        self.search_query = None;
+        self.search_state = None;
+    }
+
+    /// Initialize search state with a query.
+    pub fn init_search_state(&mut self, query: String) {
+        if query.is_empty() {
+            self.clear_search();
+            return;
+        }
+        let lower_query = query.to_lowercase();
+        let pattern_bytes = lower_query.bytes().collect::<Vec<u8>>();
+        let matcher = BMHMatcher::new(pattern_bytes);
+
+        // Compute total matches and first match position (before creating SearchState)
+        let (total, first_position) = self.compute_total_matches(&matcher);
+
+        // Create the search state with cached values
+        let state = SearchState {
+            query: lower_query,
+            matcher,
+            current_idx: 0,
+            current_position: first_position,
+            total_matches: total,
+            match_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+        };
+        self.search_state = Some(state);
+        self.search_query = Some(query);
+
+        // Navigate to first match if any
+        if total > 0 {
+            self.jump_to_match(0);
+        }
+    }
+
+    /// Compute total matches and optionally first match position.
+    fn compute_total_matches(&self, matcher: &BMHMatcher) -> (usize, Option<MatchPosition>) {
+        let Some(storage) = &self.storage else {
+            return (0, None);
+        };
+
+        let mut total = 0;
+        let mut first_position = None;
+
+        for (filtered_idx, &line_idx) in self.filtered_indices.iter().enumerate() {
+            let Some(line) = storage.get_line(line_idx) else {
+                continue;
+            };
+            let lower_bytes: Vec<u8> = line
+                .as_bytes()
+                .iter()
+                .map(|&b| b.to_ascii_lowercase())
+                .collect();
+            let matches = matcher.find_all(&lower_bytes);
+
+            for (start, end) in &matches {
+                if first_position.is_none() {
+                    first_position = Some(MatchPosition {
+                        filtered_idx,
+                        byte_offset: *start,
+                        match_len: end - start,
+                    });
+                }
+                total += 1;
+            }
+        }
+
+        (total, first_position)
+    }
+
+    /// Recompute total matches when filters change (but keep search query).
+    fn recompute_search_matches(&mut self) {
+        // Extract matcher reference first to avoid borrow issues
+        let matcher_ref = if let Some(state) = &self.search_state {
+            &state.matcher
+        } else {
+            return;
+        };
+
+        let (total, first_position) = self.compute_total_matches(matcher_ref);
+
+        // Now update the state with the computed values
+        if let Some(state) = &mut self.search_state {
+            state.total_matches = total;
+            state.current_idx = 0;
+            state.current_position = first_position;
+            state.match_cache.clear();
+        }
+    }
+
+    /// Clear search state.
+    pub fn clear_search(&mut self) {
+        self.search_query = None;
+        self.search_state = None;
+    }
+
+    /// Get matches for a specific line (with caching).
+    pub fn get_line_matches(&mut self, filtered_idx: usize) -> Vec<(usize, usize)> {
+        let Some(state) = &mut self.search_state else {
+            return Vec::new();
+        };
+
+        // Check cache first
+        if let Some(matches) = state.match_cache.get(&filtered_idx) {
+            return matches.clone();
+        }
+
+        // Get the line text
+        let Some(storage) = &self.storage else {
+            return Vec::new();
+        };
+        let Some(&line_idx) = self.filtered_indices.get(filtered_idx) else {
+            return Vec::new();
+        };
+        let Some(line) = storage.get_line(line_idx) else {
+            return Vec::new();
+        };
+
+        // Convert line to lowercase bytes for case-insensitive matching
+        let lower_bytes: Vec<u8> = line
+            .as_bytes()
+            .iter()
+            .map(|&b| b.to_ascii_lowercase())
+            .collect();
+
+        // Find all matches
+        let matches = state.matcher.find_all(&lower_bytes);
+
+        // Cache the result (clone for return value, original goes into cache)
+        let result = matches.clone();
+        state.match_cache.put(filtered_idx, matches);
+
+        result
+    }
+
+    /// Get total match count across all filtered lines.
+    /// Returns cached value for O(1) performance.
+    pub fn total_matches(&self) -> usize {
+        self.search_state
+            .as_ref()
+            .map(|s| s.total_matches)
+            .unwrap_or(0)
+    }
+
+    /// Get current match display string (e.g., "3/42").
+    pub fn current_match_display(&self) -> Option<String> {
+        let state = self.search_state.as_ref()?;
+        if state.total_matches == 0 {
+            return None;
+        }
+        Some(format!("{}/{}", state.current_idx + 1, state.total_matches))
+    }
+
+    /// Navigate to next match (with wrap-around).
+    pub fn next_match(&mut self) {
+        let total = self.total_matches();
+        if total == 0 {
+            return;
+        }
+
+        let next_idx = if let Some(state) = &self.search_state {
+            (state.current_idx + 1) % total
+        } else {
+            0
+        };
+
+        self.jump_to_match(next_idx);
+    }
+
+    /// Navigate to previous match (with wrap-around).
+    pub fn prev_match(&mut self) {
+        let total = self.total_matches();
+        if total == 0 {
+            return;
+        }
+
+        let prev_idx = if let Some(state) = &self.search_state {
+            if state.current_idx == 0 {
+                total - 1
+            } else {
+                state.current_idx - 1
+            }
+        } else {
+            0
+        };
+
+        self.jump_to_match(prev_idx);
+    }
+
+    /// Jump to a specific match by index.
+    fn jump_to_match(&mut self, match_idx: usize) {
+        let Some(state) = &mut self.search_state else {
+            return;
+        };
+
+        if state.total_matches == 0 || match_idx >= state.total_matches {
+            return;
+        }
+
+        // Update current index
+        state.current_idx = match_idx;
+
+        // Find the position of this match
+        if let Some(position) = self.get_match_position(match_idx) {
+            // Cache the position
+            if let Some(ref mut state) = self.search_state {
+                state.current_position = Some(position);
+            }
+
+            // Update vertical position
+            self.selected_line = position.filtered_idx;
+            self.clamp_scroll();
+
+            // Horizontal auto-scroll
+            let Some(storage) = &self.storage else { return };
+            let Some(&line_idx) = self.filtered_indices.get(position.filtered_idx) else {
+                return;
+            };
+            let Some(line) = storage.get_line(line_idx) else {
+                return;
+            };
+            let line_text = line.as_str_lossy();
+
+            // Calculate character offset from byte offset
+            let match_char_pos = byte_to_char_offset(&line_text, position.byte_offset);
+            // Calculate match length in characters (not bytes) for consistent scroll math
+            let match_text =
+                &line_text[position.byte_offset..position.byte_offset + position.match_len];
+            let match_char_len = match_text.chars().count();
+
+            let viewport_width = self.viewport_width.get();
+            let margin = 10;
+
+            // Only adjust horizontal scroll if match is outside viewport
+            if match_char_pos < self.horizontal_scroll {
+                // Match is left of viewport - scroll to show it with margin
+                self.horizontal_scroll = match_char_pos.saturating_sub(margin);
+            } else if match_char_pos + match_char_len
+                > self.horizontal_scroll + viewport_width.saturating_sub(margin)
+            {
+                // Match is right of viewport - scroll to show it
+                self.horizontal_scroll =
+                    (match_char_pos + match_char_len + margin).saturating_sub(viewport_width);
+            }
+        }
+    }
+
+    /// Get the position of a match by its global index.
+    fn get_match_position(&self, match_idx: usize) -> Option<MatchPosition> {
+        let state = self.search_state.as_ref()?;
+        let storage = self.storage.as_ref()?;
+
+        let mut current_match = 0;
+
+        for (filtered_idx, &line_idx) in self.filtered_indices.iter().enumerate() {
+            let line = storage.get_line(line_idx)?;
+            let lower_bytes: Vec<u8> = line
+                .as_bytes()
+                .iter()
+                .map(|&b| b.to_ascii_lowercase())
+                .collect();
+            let matches = state.matcher.find_all(&lower_bytes);
+
+            for (start, end) in matches {
+                if current_match == match_idx {
+                    return Some(MatchPosition {
+                        filtered_idx,
+                        byte_offset: start,
+                        match_len: end - start,
+                    });
+                }
+                current_match += 1;
+            }
+        }
+
+        None
+    }
+
+    /// Check if a specific position is the current match.
+    /// Uses O(1) cached position lookup instead of linear scan.
+    pub fn is_current_match(&self, filtered_idx: usize, byte_offset: usize) -> bool {
+        let Some(state) = &self.search_state else {
+            return false;
+        };
+
+        // Use cached position for O(1) lookup
+        if let Some(pos) = state.current_position {
+            return pos.filtered_idx == filtered_idx && pos.byte_offset == byte_offset;
+        }
+
+        false
+    }
+
+    /// Check if there is an active search.
+    pub fn has_search(&self) -> bool {
+        self.search_state.is_some()
+    }
+
+    /// Get the search query if any.
+    pub fn get_search_query(&self) -> Option<&str> {
+        self.search_query.as_deref()
+    }
+}
+
+/// Convert byte offset to character offset in a string.
+/// Safely handles multi-byte UTF-8 characters by using char_indices.
+fn byte_to_char_offset(text: &str, byte_offset: usize) -> usize {
+    text.char_indices()
+        .take_while(|(idx, _)| *idx < byte_offset)
+        .count()
 }
 
 impl Default for App {
@@ -633,5 +1032,107 @@ mod tests {
             App::parse_command("  write   file.log  "),
             ("write", "file.log")
         );
+    }
+
+    #[test]
+    fn test_search_init_and_clear() {
+        let mut app = App::new();
+
+        // Initially no search
+        assert!(!app.has_search());
+        assert_eq!(app.get_search_query(), None);
+
+        // Initialize search
+        app.init_search_state("test".to_string());
+
+        // Now has search
+        assert!(app.has_search());
+        assert_eq!(app.get_search_query(), Some("test"));
+
+        // Clear search
+        app.clear_search();
+
+        // No search anymore
+        assert!(!app.has_search());
+        assert_eq!(app.get_search_query(), None);
+    }
+
+    #[test]
+    fn test_search_matches() {
+        let mut app = App::new();
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "This is a test line").unwrap();
+        writeln!(temp_file, "Another test line").unwrap();
+        writeln!(temp_file, "No match here").unwrap();
+        let storage = LogStorage::from_file(temp_file.path()).unwrap();
+        app.set_storage(storage);
+
+        // Initialize search for "test"
+        app.init_search_state("test".to_string());
+
+        // Check total matches (should be 2)
+        assert_eq!(app.total_matches(), 2);
+
+        // Get line matches for line 0
+        let matches = app.get_line_matches(0);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], (10, 14)); // "test" position in "This is a test line"
+
+        // Get line matches for line 1
+        let matches = app.get_line_matches(1);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], (8, 12)); // "test" position in "Another test line"
+
+        // Get line matches for line 2 (no matches)
+        let matches = app.get_line_matches(2);
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_search_case_insensitive() {
+        let mut app = App::new();
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "ERROR message").unwrap();
+        writeln!(temp_file, "error message").unwrap();
+        writeln!(temp_file, "Error message").unwrap();
+        let storage = LogStorage::from_file(temp_file.path()).unwrap();
+        app.set_storage(storage);
+
+        // Search for lowercase "error" - should match all variations
+        app.init_search_state("error".to_string());
+
+        // Each line should have one match
+        assert_eq!(app.get_line_matches(0).len(), 1);
+        assert_eq!(app.get_line_matches(1).len(), 1);
+        assert_eq!(app.get_line_matches(2).len(), 1);
+    }
+
+    #[test]
+    fn test_search_filter_clears_search() {
+        let mut app = App::new();
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "test line 1").unwrap();
+        writeln!(temp_file, "test line 2").unwrap();
+        let storage = LogStorage::from_file(temp_file.path()).unwrap();
+        app.set_storage(storage);
+
+        // Set up a search
+        app.init_search_state("test".to_string());
+        assert!(app.has_search());
+
+        // Simulate filter change - clear search
+        app.clear_search_on_refilter();
+
+        // Search should be cleared
+        assert!(!app.has_search());
+        assert_eq!(app.get_search_query(), None);
+    }
+
+    #[test]
+    fn test_byte_to_char_offset() {
+        assert_eq!(byte_to_char_offset("hello", 0), 0);
+        assert_eq!(byte_to_char_offset("hello", 5), 5);
+        assert_eq!(byte_to_char_offset("hello world", 6), 6);
+        assert_eq!(byte_to_char_offset("", 0), 0);
     }
 }

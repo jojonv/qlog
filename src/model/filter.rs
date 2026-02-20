@@ -62,15 +62,17 @@ impl BMHMatcher {
 
         while pos < text.len() {
             // Check if pattern matches at current position
+            let mut matched = true;
             let mut i = self.pattern_len;
             while i > 0 {
                 i -= 1;
                 if text[pos - (self.pattern_len - 1 - i)] != self.pattern[i] {
+                    matched = false;
                     break;
                 }
             }
 
-            if i == 0 {
+            if matched {
                 // Found match
                 return Some(pos - last);
             }
@@ -86,6 +88,61 @@ impl BMHMatcher {
     /// Check if pattern exists in text.
     pub fn contains(&self, text: &[u8]) -> bool {
         self.find(text).is_some()
+    }
+
+    /// Find all match positions in text.
+    /// Returns vector of (start, end) byte positions.
+    pub fn find_all(&self, text: &[u8]) -> Vec<(usize, usize)> {
+        let mut matches = Vec::new();
+
+        if self.pattern_len == 0 {
+            return matches;
+        }
+
+        if self.pattern_len > text.len() {
+            return matches;
+        }
+
+        // Special case for single character patterns
+        if self.pattern_len == 1 {
+            let byte = self.pattern[0];
+            for (i, &text_byte) in text.iter().enumerate() {
+                if text_byte == byte {
+                    matches.push((i, i + 1));
+                }
+            }
+            return matches;
+        }
+
+        let last = self.pattern_len - 1;
+        let mut pos = last;
+
+        while pos < text.len() {
+            // Check if pattern matches at current position
+            let mut matched = true;
+            let mut i = self.pattern_len;
+            while i > 0 {
+                i -= 1;
+                if text[pos - (self.pattern_len - 1 - i)] != self.pattern[i] {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if matched {
+                // Found match
+                let start = pos - last;
+                matches.push((start, start + self.pattern_len));
+                // Move past this match to find overlapping matches
+                pos += 1;
+            } else {
+                // Shift by skip table value for the character at current position
+                let shift = self.skip_table[text[pos] as usize];
+                pos += shift;
+            }
+        }
+
+        matches
     }
 }
 
@@ -460,6 +517,18 @@ mod tests {
     }
 
     #[test]
+    fn test_bmh_matcher_no_false_positive() {
+        // Bug fix: "jeb" was incorrectly matching "0EB" because the
+        // loop decremented i before checking, causing i==0 to be true
+        // even when the first character didn't match.
+        let matcher = BMHMatcher::new(vec![b'j', b'e', b'b']);
+        assert!(!matcher.contains(b"0EB")); // j vs 0 should not match
+        assert!(!matcher.contains(b"abc"));
+        assert!(matcher.contains(b"jeb"));
+        // Note: BMHMatcher is case-sensitive; caller handles case insensitivity
+    }
+
+    #[test]
     fn test_filter_matches() {
         let filter = Filter::new("ERROR");
 
@@ -553,5 +622,58 @@ mod tests {
 
         assert!(!filter.matches(b"old value"));
         assert!(filter.matches(b"new value"));
+    }
+
+    #[test]
+    fn test_bmh_find_all_basic() {
+        let matcher = BMHMatcher::new(vec![b'a', b'b']);
+        let matches = matcher.find_all(b"abc ab ab");
+        assert_eq!(matches, vec![(0, 2), (4, 6), (7, 9)]);
+    }
+
+    #[test]
+    fn test_bmh_find_all_overlapping() {
+        let matcher = BMHMatcher::new(vec![b'a', b'a']);
+        let matches = matcher.find_all(b"aaaa");
+        assert_eq!(matches, vec![(0, 2), (1, 3), (2, 4)]);
+    }
+
+    #[test]
+    fn test_bmh_find_all_case_insensitive() {
+        // Pattern in lowercase
+        let matcher = BMHMatcher::new(vec![b't', b'e', b's', b't']);
+        // Text also in lowercase (caller responsibility)
+        let matches = matcher.find_all(b"this is a test string with test");
+        assert_eq!(matches, vec![(10, 14), (27, 31)]);
+    }
+
+    #[test]
+    fn test_bmh_find_all_empty_pattern() {
+        let matcher = BMHMatcher::new(vec![]);
+        let matches = matcher.find_all(b"hello");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_bmh_find_all_pattern_longer_than_text() {
+        let matcher = BMHMatcher::new(vec![
+            b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd',
+        ]);
+        let matches = matcher.find_all(b"hello");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_bmh_find_all_single_char() {
+        let matcher = BMHMatcher::new(vec![b'a']);
+        let matches = matcher.find_all(b"banana");
+        assert_eq!(matches, vec![(1, 2), (3, 4), (5, 6)]);
+    }
+
+    #[test]
+    fn test_bmh_find_all_no_matches() {
+        let matcher = BMHMatcher::new(vec![b'x', b'y', b'z']);
+        let matches = matcher.find_all(b"hello world");
+        assert!(matches.is_empty());
     }
 }

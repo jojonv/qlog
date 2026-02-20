@@ -27,7 +27,46 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
+
+/// Configuration for search highlight colors.
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    /// Foreground color for all match highlights
+    pub match_fg: Color,
+    /// Background color for all match highlights
+    pub match_bg: Color,
+    /// Style modifiers for all matches (bold, underline, reverse)
+    pub match_style: Style,
+    /// Foreground color for the current (active) match
+    pub current_fg: Color,
+    /// Background color for the current (active) match
+    pub current_bg: Color,
+    /// Style modifiers for current match
+    pub current_style: Style,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            match_fg: Color::Black,
+            match_bg: Color::Yellow,
+            match_style: Style::default().add_modifier(Modifier::BOLD),
+            current_fg: Color::Black,
+            current_bg: Color::LightYellow,
+            current_style: Style::default().add_modifier(Modifier::BOLD),
+        }
+    }
+}
+
+/// Unified application configuration.
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    /// Log line color configuration
+    pub colors: ColorConfig,
+    /// Search highlight configuration
+    pub search: SearchConfig,
+}
 
 /// Configuration for log line coloring.
 #[derive(Debug, Clone)]
@@ -208,6 +247,139 @@ impl PatternMatcher {
             MatchType::Exact => line_lower == self.pattern,
         }
     }
+}
+
+impl AppConfig {
+    /// Load configuration from file.
+    ///
+    /// Checks `./.qlog/qlog.toml` first, then falls back to `~/.qlog/qlog.toml`.
+    /// Returns default configuration if no config file is found.
+    pub fn load() -> Option<Self> {
+        // Try current directory first
+        let local_config = PathBuf::from(".qlog/qlog.toml");
+        if local_config.exists() {
+            return Self::load_from_path(&local_config);
+        }
+
+        // Fall back to home directory
+        if let Some(home_dir) = dirs::home_dir() {
+            let home_config = home_dir.join(".qlog/qlog.toml");
+            if home_config.exists() {
+                return Self::load_from_path(&home_config);
+            }
+        }
+
+        None
+    }
+
+    /// Load configuration from a specific path.
+    fn load_from_path(path: &PathBuf) -> Option<Self> {
+        match fs::read_to_string(path) {
+            Ok(content) => Self::parse_toml(&content),
+            Err(e) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "Error reading config file {}: {}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Parse TOML configuration content.
+    fn parse_toml(content: &str) -> Option<Self> {
+        let doc = content.parse::<toml::Table>().ok()?;
+
+        // Parse colors section
+        let colors = if let Some(colors_table) = doc.get("colors").and_then(|v| v.as_table()) {
+            let mut patterns = Vec::new();
+            for (pattern, color_value) in colors_table {
+                let color_str = match color_value.as_str() {
+                    Some(s) => s,
+                    None => {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "Invalid color value for pattern '{}': expected string",
+                            pattern
+                        );
+                        continue;
+                    }
+                };
+
+                let color = match parse_color(color_str) {
+                    Some(c) => c,
+                    None => {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "Unknown color '{}' for pattern '{}'",
+                            color_str,
+                            pattern
+                        );
+                        continue;
+                    }
+                };
+
+                let matcher = PatternMatcher::new(pattern);
+                patterns.push((matcher, color));
+            }
+            ColorConfig { patterns }
+        } else {
+            ColorConfig {
+                patterns: Vec::new(),
+            }
+        };
+
+        // Parse search section
+        let mut search = SearchConfig::default();
+        if let Some(search_table) = doc.get("search").and_then(|v| v.as_table()) {
+            if let Some(fg) = search_table.get("match_fg").and_then(|v| v.as_str()) {
+                if let Some(color) = parse_color(fg) {
+                    search.match_fg = color;
+                }
+            }
+            if let Some(bg) = search_table.get("match_bg").and_then(|v| v.as_str()) {
+                if let Some(color) = parse_color(bg) {
+                    search.match_bg = color;
+                }
+            }
+            if let Some(style) = search_table.get("match_style").and_then(|v| v.as_str()) {
+                search.match_style = parse_style(style);
+            }
+            if let Some(fg) = search_table.get("current_fg").and_then(|v| v.as_str()) {
+                if let Some(color) = parse_color(fg) {
+                    search.current_fg = color;
+                }
+            }
+            if let Some(bg) = search_table.get("current_bg").and_then(|v| v.as_str()) {
+                if let Some(color) = parse_color(bg) {
+                    search.current_bg = color;
+                }
+            }
+            if let Some(style) = search_table.get("current_style").and_then(|v| v.as_str()) {
+                search.current_style = parse_style(style);
+            }
+        }
+
+        Some(Self { colors, search })
+    }
+}
+
+/// Parse a style string to a ratatui Style.
+fn parse_style(style_str: &str) -> Style {
+    let mut style = Style::default();
+    for modifier in style_str.split_whitespace() {
+        style = match modifier.to_lowercase().as_str() {
+            "bold" => style.add_modifier(Modifier::BOLD),
+            "underline" => style.add_modifier(Modifier::UNDERLINED),
+            "reverse" => style.add_modifier(Modifier::REVERSED),
+            "italic" => style.add_modifier(Modifier::ITALIC),
+            "dim" => style.add_modifier(Modifier::DIM),
+            _ => style,
+        };
+    }
+    style
 }
 
 /// Parse a color name to a ratatui Color.

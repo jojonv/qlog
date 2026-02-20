@@ -29,7 +29,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(match app.mode {
-            Mode::FilterInput => vec![
+            Mode::FilterInput | Mode::SearchInput => vec![
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Min(0),
@@ -62,6 +62,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         Mode::Command => {
             draw_command_input(frame, app, chunks[1]);
+            main_chunk = chunks[2];
+            status_chunk = chunks[3];
+        }
+        Mode::SearchInput => {
+            draw_search_input(frame, app, chunks[1]);
             main_chunk = chunks[2];
             status_chunk = chunks[3];
         }
@@ -171,6 +176,20 @@ fn draw_command_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
     frame.render_widget(input_box, area);
 }
 
+fn draw_search_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
+
+    let line = Line::from(vec![
+        Span::styled("/", Style::default().fg(Color::Yellow)),
+        Span::styled(&app.input_buffer, Style::default().fg(Color::White)),
+        Span::styled(" ", cursor_style),
+    ]);
+
+    let input_box =
+        Paragraph::new(line).block(Block::default().title("Search Input").borders(Borders::ALL));
+    frame.render_widget(input_box, area);
+}
+
 fn draw_main_view(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let inner_area = area.inner(&Margin {
         vertical: 1,
@@ -221,9 +240,42 @@ fn draw_main_view(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
         entries_to_take = 1;
     }
 
-    let log_lines: Vec<Line> = (app.scroll_offset..app.scroll_offset + entries_to_take)
+    // Collect line data first to avoid borrow issues
+    let line_data: Vec<(
+        usize,
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<Color>,
+    )> = (app.scroll_offset..app.scroll_offset + entries_to_take)
         .filter_map(|idx| {
             app.get_filtered_entry(idx).map(|mmap_str| {
+                let line_text = mmap_str.as_str_lossy().to_string();
+                let line_fg_color = app.get_line_color(&line_text);
+                let timestamp = app.get_filtered_timestamp(idx);
+                (idx, line_text, timestamp, line_fg_color)
+            })
+        })
+        .collect();
+
+    // Pre-compute matches for all visible lines
+    let line_matches: Vec<(usize, Vec<(usize, usize)>)> = line_data
+        .iter()
+        .map(|(idx, _, _, _)| {
+            let matches = if app.has_search() {
+                app.get_line_matches(*idx)
+            } else {
+                Vec::new()
+            };
+            (*idx, matches)
+        })
+        .collect();
+
+    // Build log lines with highlighting
+    let log_lines: Vec<Line> = line_data
+        .into_iter()
+        .zip(line_matches.into_iter())
+        .filter_map(
+            |((idx, line_text, timestamp, line_fg_color), (_, matches))| {
                 let is_selected = idx == app.selected_line;
 
                 // Selection takes precedence - set background
@@ -233,14 +285,10 @@ fn draw_main_view(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
                     None
                 };
 
-                // Get line color from config (for foreground)
-                let line_text = mmap_str.as_str_lossy();
-                let line_fg_color = app.get_line_color(&line_text);
-
                 let mut spans = Vec::new();
 
                 // Add timestamp if available - always cyan
-                if let Some(ts) = app.get_filtered_timestamp(idx) {
+                if let Some(ts) = timestamp {
                     let ts_style = match base_bg {
                         Some(bg) => Style::default().fg(Color::Cyan).bg(bg),
                         None => Style::default().fg(Color::Cyan),
@@ -251,18 +299,94 @@ fn draw_main_view(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
                     ));
                 }
 
-                // Add the log line text with optional color from config
-                let text_style = match (line_fg_color, base_bg) {
-                    (Some(fg), Some(bg)) => Style::default().fg(fg).bg(bg),
-                    (Some(fg), None) => Style::default().fg(fg),
-                    (None, Some(bg)) => Style::default().bg(bg),
-                    (None, None) => Style::default(),
-                };
-                spans.push(Span::styled(line_text.to_string(), text_style));
+                if matches.is_empty() {
+                    // No matches - add the whole line as one span
+                    let text_style = match (line_fg_color, base_bg) {
+                        (Some(fg), Some(bg)) => Style::default().fg(fg).bg(bg),
+                        (Some(fg), None) => Style::default().fg(fg),
+                        (None, Some(bg)) => Style::default().bg(bg),
+                        (None, None) => Style::default(),
+                    };
+                    spans.push(Span::styled(line_text, text_style));
+                } else {
+                    // Split line into spans around matches
+                    let line_bytes = line_text.as_bytes();
+                    let mut last_end = 0;
 
-                Line::from(spans)
-            })
-        })
+                    for (match_start, match_end) in matches {
+                        // Add text before match
+                        if match_start > last_end {
+                            let before_text =
+                                String::from_utf8_lossy(&line_bytes[last_end..match_start]);
+                            let text_style = match (line_fg_color, base_bg) {
+                                (Some(fg), Some(bg)) => Style::default().fg(fg).bg(bg),
+                                (Some(fg), None) => Style::default().fg(fg),
+                                (None, Some(bg)) => Style::default().bg(bg),
+                                (None, None) => Style::default(),
+                            };
+                            spans.push(Span::styled(before_text.to_string(), text_style));
+                        }
+
+                        // Add match span with highlight
+                        let match_text =
+                            String::from_utf8_lossy(&line_bytes[match_start..match_end]);
+                        let is_current = app.is_current_match(idx, match_start);
+
+                        let match_style = if let Some(search_config) = app.search_config() {
+                            if is_current {
+                                let style = search_config
+                                    .current_style
+                                    .fg(search_config.current_fg)
+                                    .bg(search_config.current_bg);
+                                if base_bg.is_some() {
+                                    // Don't override selection bg
+                                    let base_style = style.bg(base_bg.unwrap());
+                                    base_style
+                                } else {
+                                    style
+                                }
+                            } else {
+                                let style = search_config
+                                    .match_style
+                                    .fg(search_config.match_fg)
+                                    .bg(search_config.match_bg);
+                                if base_bg.is_some() {
+                                    // Don't override selection bg
+                                    let base_style = style.bg(base_bg.unwrap());
+                                    base_style
+                                } else {
+                                    style
+                                }
+                            }
+                        } else {
+                            // Fallback colors
+                            if is_current {
+                                Style::default().fg(Color::Black).bg(Color::LightYellow)
+                            } else {
+                                Style::default().fg(Color::Black).bg(Color::Yellow)
+                            }
+                        };
+
+                        spans.push(Span::styled(match_text.to_string(), match_style));
+                        last_end = match_end;
+                    }
+
+                    // Add remaining text after last match
+                    if last_end < line_bytes.len() {
+                        let after_text = String::from_utf8_lossy(&line_bytes[last_end..]);
+                        let text_style = match (line_fg_color, base_bg) {
+                            (Some(fg), Some(bg)) => Style::default().fg(fg).bg(bg),
+                            (Some(fg), None) => Style::default().fg(fg),
+                            (None, Some(bg)) => Style::default().bg(bg),
+                            (None, None) => Style::default(),
+                        };
+                        spans.push(Span::styled(after_text.to_string(), text_style));
+                    }
+                }
+
+                Some(Line::from(spans))
+            },
+        )
         .collect();
 
     // Calculate approximate max line width for scrollbar
@@ -352,14 +476,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Mode::FilterInput => "INPUT",
         Mode::Command => "COMMAND",
         Mode::DateRange => "DATE",
+        Mode::SearchInput => "SEARCH",
     };
 
     let help_text = match app.mode {
-        Mode::Normal => "j/k: Scroll | h/l: H-scroll | w: Wrap | g/G: Top/Bottom | t: Filter mode | q: Quit",
+        Mode::Normal => "j/k: Scroll | h/l: H-scroll | w: Wrap | g/G: Top/Bottom | t: Filter mode | /: Search | n/N: Next/Prev match | q: Quit",
         Mode::Filter => "j/k: Select filter | h/l: Switch group | f/F: Add filter | d: Delete | Space: Toggle | t/Esc: Content mode",
         Mode::FilterInput => "Enter: Confirm | Esc: Cancel",
         Mode::Command => "Enter: Execute | Esc: Cancel",
         Mode::DateRange => "Date range mode (unused)",
+        Mode::SearchInput => "Enter: Execute search | Esc: Cancel | Backspace: Delete char",
     };
 
     let mode_style = match app.mode {
@@ -368,18 +494,34 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Mode::FilterInput => Style::default().fg(Color::Yellow),
         Mode::Command => Style::default().fg(Color::Magenta),
         Mode::DateRange => Style::default().fg(Color::Red),
+        Mode::SearchInput => Style::default().fg(Color::Yellow),
     };
 
-    let status_text = if app.status_message.is_empty() {
-        format!(
-            "[{}] Line {}/{} | {}",
-            mode_name,
-            app.selected_line + 1,
-            app.filtered_len(),
-            help_text
-        )
-    } else {
+    let status_text = if !app.status_message.is_empty() {
         format!("[{}] {}", mode_name, app.status_message)
+    } else {
+        // Build status parts
+        let mut parts = vec![format!("[{}]", mode_name)];
+
+        // Line position
+        parts.push(format!(
+            "Line {}/{}",
+            app.selected_line + 1,
+            app.filtered_len()
+        ));
+
+        // Search status if active
+        if let Some(query) = app.get_search_query() {
+            if let Some(match_display) = app.current_match_display() {
+                parts.push(format!("Search: '{}' {}", query, match_display));
+            } else {
+                parts.push(format!("Search: '{}' (0 matches)", query));
+            }
+        }
+
+        parts.push(help_text.to_string());
+
+        parts.join(" | ")
     };
 
     let status_bar = Paragraph::new(status_text)
