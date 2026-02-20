@@ -539,7 +539,12 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.mode = Mode::SearchInput;
-                self.input_buffer.clear();
+                // Pre-populate with last search query if exists
+                if let Some(last_query) = &self.search_query {
+                    self.input_buffer = last_query.clone();
+                } else {
+                    self.input_buffer.clear();
+                }
             }
             KeyCode::Char('n') => {
                 self.next_match();
