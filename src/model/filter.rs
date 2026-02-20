@@ -267,19 +267,19 @@ impl FilterGroup {
     }
 
     /// Check if the group matches the given line bytes.
-    /// All filters must match (AND logic).
+    /// At least one filter must match (OR logic).
     pub fn matches(&self, line_bytes: &[u8]) -> bool {
         if self.filters.is_empty() {
             return true;
         }
 
         for filter in &self.filters {
-            if !filter.matches(line_bytes) {
-                return false;
+            if filter.matches(line_bytes) {
+                return true;
             }
         }
 
-        true
+        false
     }
 
     /// Clear all filters.
@@ -508,15 +508,16 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_group_and() {
+    fn test_filter_group_or() {
         let mut group = FilterGroup::new();
         group.add_filter(Filter::new("ERROR"));
         group.add_filter(Filter::new("timeout"));
 
-        assert!(group.matches(b"ERROR: connection timeout"));
-        assert!(!group.matches(b"ERROR: failed"));
-        assert!(!group.matches(b"timeout occurred"));
-        assert!(group.matches(b"error: connection Timeout"));
+        // Group uses OR logic - at least one filter must match
+        assert!(group.matches(b"ERROR: connection timeout")); // both match
+        assert!(group.matches(b"ERROR: failed")); // only "ERROR" matches
+        assert!(group.matches(b"timeout occurred")); // only "timeout" matches
+        assert!(!group.matches(b"info message")); // neither matches
     }
 
     #[test]

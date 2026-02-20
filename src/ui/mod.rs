@@ -80,7 +80,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     for (gi, group) in app.filters.groups().iter().enumerate() {
         if gi > 0 {
-            spans.push(Span::styled(" | ", Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(" AND ", Style::default().fg(Color::Yellow)));
         }
 
         if group.filters().is_empty() {

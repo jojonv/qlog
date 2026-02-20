@@ -34,14 +34,11 @@ fn test_filter_group_or_logic() {
     group.add_filter(Filter::new("error"));
     group.add_filter(Filter::new("warning"));
 
-    // Group uses AND logic - both filters must match
-    // "error" is in the text, "warning" is not - so this fails
-    assert!(!group.matches("warning message".as_bytes()));
-    assert!(!group.matches("error message".as_bytes()));
-    assert!(!group.matches("info message".as_bytes()));
-
-    // Only when both keywords are present
-    assert!(group.matches("error and warning message".as_bytes()));
+    // Group uses OR logic - at least one filter must match
+    assert!(group.matches("error message".as_bytes())); // matches "error"
+    assert!(group.matches("warning message".as_bytes())); // matches "warning"
+    assert!(group.matches("error and warning".as_bytes())); // matches both
+    assert!(!group.matches("info message".as_bytes())); // matches neither
 }
 
 #[test]
