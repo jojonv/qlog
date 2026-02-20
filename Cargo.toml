@@ -19,6 +19,7 @@ libc = "0.2"
 toml = "0.8"
 dirs = "5.0"
 lru = "0.12"
+arboard = "3"
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -1,5 +1,6 @@
+use crate::clipboard::Clipboard;
 use crate::config::AppConfig;
-use crate::model::{BMHMatcher, FilterSet, LogStorage, VisualLineCache};
+use crate::model::{BMHMatcher, Direction, FilterSet, LogStorage, Selection, VisualLineCache};
 use chrono::Local;
 use crossterm::event::KeyCode;
 use lru::LruCache;
@@ -103,6 +104,10 @@ pub struct App {
     pub search_query: Option<String>,
     /// Search state with matcher and cache
     pub search_state: Option<SearchState>,
+    /// Active selection for Helix-style line selection
+    pub selection: Selection,
+    /// System clipboard wrapper (may be None on headless systems)
+    pub clipboard: Option<Clipboard>,
 }
 
 impl App {
@@ -131,6 +136,8 @@ impl App {
             config: AppConfig::load(),
             search_query: None,
             search_state: None,
+            selection: Selection::new(),
+            clipboard: Clipboard::new().ok(),
         }
     }
 
@@ -237,6 +244,9 @@ impl App {
 
         // Clear visual cache since filtered indices changed
         self.visual_cache.clear();
+
+        // Clear selection since filter indices are now invalid
+        self.selection.clear();
     }
 
     /// Calculate visual line offsets for the current filtered view.
@@ -499,13 +509,33 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.status_message.clear();
                 if self.selected_line < self.filtered_len().saturating_sub(1) {
+                    let old_line = self.selected_line;
                     self.selected_line += 1;
+                    // Extend selection if active
+                    if self.selection.is_active() {
+                        let direction = if self.selected_line > old_line {
+                            Direction::Down
+                        } else {
+                            Direction::Up
+                        };
+                        self.selection.extend(self.selected_line, direction);
+                    }
                 }
                 self.clamp_scroll();
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.status_message.clear();
+                let old_line = self.selected_line;
                 self.selected_line = self.selected_line.saturating_sub(1);
+                // Extend selection if active
+                if self.selection.is_active() {
+                    let direction = if self.selected_line < old_line {
+                        Direction::Up
+                    } else {
+                        Direction::Down
+                    };
+                    self.selection.extend(self.selected_line, direction);
+                }
                 self.clamp_scroll();
             }
             KeyCode::Char('l') | KeyCode::Right => {
@@ -537,6 +567,29 @@ impl App {
                     "Wrap mode disabled".to_string()
                 };
             }
+            KeyCode::Char('x') => {
+                if self.selection.is_active() {
+                    // Extend selection - determine direction based on cursor movement
+                    if let Some((start, _end)) = self.selection.range(self.selected_line) {
+                        let direction = if self.selected_line > start {
+                            Direction::Down
+                        } else {
+                            Direction::Up
+                        };
+                        self.selection.extend(self.selected_line, direction);
+                    }
+                } else {
+                    // Start new selection at current cursor
+                    self.selection.start(self.selected_line);
+                }
+            }
+            KeyCode::Char('y') => {
+                self.handle_yank();
+            }
+            KeyCode::Esc => {
+                self.selection.clear();
+                self.status_message.clear();
+            }
             KeyCode::Char('/') => {
                 self.mode = Mode::SearchInput;
                 // Pre-populate with last search query if exists
@@ -553,6 +606,56 @@ impl App {
                 self.prev_match();
             }
             _ => {}
+        }
+    }
+
+    /// Handle yank (copy) operation
+    fn handle_yank(&mut self) {
+        // Check if selection is active
+        if !self.selection.is_active() {
+            return;
+        }
+
+        // Check if clipboard is available
+        let Some(ref mut clipboard) = self.clipboard else {
+            self.status_message = "Clipboard unavailable - install display server".to_string();
+            return;
+        };
+
+        // Get the selection range
+        let Some((start, end)) = self.selection.range(self.selected_line) else {
+            return;
+        };
+
+        // Retrieve the raw lines from storage
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+
+        let mut lines = Vec::new();
+        for idx in start..=end {
+            if let Some(&storage_idx) = self.filtered_indices.get(idx) {
+                if let Some(line) = storage.get_line(storage_idx) {
+                    lines.push(line.as_str_lossy().to_string());
+                }
+            }
+        }
+
+        if lines.is_empty() {
+            return;
+        }
+
+        // Join lines with newline
+        let text = lines.join("\n");
+
+        // Copy to clipboard
+        match clipboard.copy(&text) {
+            Ok(()) => {
+                self.status_message = format!("Copied {} lines to clipboard", lines.len());
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to copy: {}", e);
+            }
         }
     }
 

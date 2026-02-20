@@ -277,10 +277,14 @@ fn draw_main_view(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
         .filter_map(
             |((idx, line_text, timestamp, line_fg_color), (_, matches))| {
                 let is_selected = idx == app.selected_line;
+                let is_in_selection = app.selection.contains(idx, app.selected_line);
 
                 // Selection takes precedence - set background
+                // Use DarkGray for cursor line, Gray for other selected lines
                 let base_bg = if is_selected {
                     Some(Color::DarkGray)
+                } else if is_in_selection {
+                    Some(Color::Gray)
                 } else {
                     None
                 };
