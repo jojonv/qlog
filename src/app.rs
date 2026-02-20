@@ -362,6 +362,9 @@ impl App {
                     }
                 }
             }
+            "q" | "quit" => {
+                self.should_quit = true;
+            }
             _ => {
                 self.status_message = format!("Unknown command: {}", command);
             }
@@ -419,9 +422,6 @@ impl App {
 
     fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.status_message.clear();
                 if self.selected_line < self.filtered_len().saturating_sub(1) {
