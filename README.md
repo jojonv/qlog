@@ -11,6 +11,7 @@ A TUI (Terminal User Interface) application for viewing and filtering como-data-
 - **Async Loading**: Efficient loading for large datasets
 - **Virtual Scrolling**: Handle millions of lines with only visible lines rendered
 - **Horizontal Scroll**: View wide log content with wrap mode toggle
+- **Configurable Log Coloring**: Customize line colors via TOML config files
 
 ## Installation
 
@@ -73,6 +74,38 @@ A log line must match at least one filter from each group to be shown.
 
 Filter matching is **case-insensitive** substring search against the raw log line.
 
+## Log Coloring
+
+Log lines can be colored based on pattern matching. Create a configuration file at:
+
+1. `./.qlog/qlog.toml` (current directory) - takes precedence
+2. `~/.qlog/qlog.toml` (home directory) - fallback
+
+### Example Configuration
+
+```toml
+[colors]
+error = "red"
+warn = "yellow"
+success = "green"
+"*TODO*" = "magenta"
+```
+
+### Pattern Matching
+
+- `error` - matches lines containing "error" (case-insensitive)
+- `*error` - matches lines ending with "error"
+- `error*` - matches lines starting with "error"
+- `*error*` - matches lines containing "error"
+
+First match wins based on config file order. Timestamps remain cyan regardless of line color.
+
+### Supported Colors
+
+Basic: `red`, `green`, `blue`, `yellow`, `magenta`, `cyan`, `white`, `black`, `gray`
+
+Extended: `dark_gray`, `light_red`, `light_green`, `light_blue`, `light_yellow`, `light_magenta`, `light_cyan`
+
 ## Architecture
 
 ```
@@ -80,6 +113,7 @@ src/
 ├── main.rs           # Entry point and CLI args
 ├── lib.rs            # Library exports
 ├── app.rs            # Application state and key handling
+├── config.rs         # Log coloring configuration
 ├── model/
 │   ├── log_entry.rs  # Log entry (raw text + optional timestamp)
 │   ├── filter.rs     # Filter/FilterGroup/FilterSet with OR/AND logic

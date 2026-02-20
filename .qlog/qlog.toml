@@ -1,0 +1,14 @@
+# Sample qlog configuration file
+# Place this file at .qlog/qlog.toml (current directory) or ~/.qlog/qlog.toml (home directory)
+
+[colors]
+# Color log lines containing these patterns
+error = "red"
+warn = "yellow"
+success = "green"
+"*TODO*" = "magenta"
+
+# You can add more patterns:
+# "exception" = "light_red"
+# "debug" = "dark_gray"
+# "info" = "cyan"

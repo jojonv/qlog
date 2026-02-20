@@ -225,27 +225,40 @@ fn draw_main_view(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
         .filter_map(|idx| {
             app.get_filtered_entry(idx).map(|mmap_str| {
                 let is_selected = idx == app.selected_line;
-                let base_style = if is_selected {
-                    Style::default().bg(Color::DarkGray)
+
+                // Selection takes precedence - set background
+                let base_bg = if is_selected {
+                    Some(Color::DarkGray)
                 } else {
-                    Style::default()
+                    None
                 };
+
+                // Get line color from config (for foreground)
+                let line_text = mmap_str.as_str_lossy();
+                let line_fg_color = app.get_line_color(&line_text);
 
                 let mut spans = Vec::new();
 
-                // Add timestamp if available
+                // Add timestamp if available - always cyan
                 if let Some(ts) = app.get_filtered_timestamp(idx) {
+                    let ts_style = match base_bg {
+                        Some(bg) => Style::default().fg(Color::Cyan).bg(bg),
+                        None => Style::default().fg(Color::Cyan),
+                    };
                     spans.push(Span::styled(
                         ts.format("%Y-%m-%d %H:%M:%S ").to_string(),
-                        base_style.fg(Color::Cyan),
+                        ts_style,
                     ));
                 }
 
-                // Add the log line text (lossy UTF-8 conversion at display time)
-                spans.push(Span::styled(
-                    mmap_str.as_str_lossy().to_string(),
-                    base_style,
-                ));
+                // Add the log line text with optional color from config
+                let text_style = match (line_fg_color, base_bg) {
+                    (Some(fg), Some(bg)) => Style::default().fg(fg).bg(bg),
+                    (Some(fg), None) => Style::default().fg(fg),
+                    (None, Some(bg)) => Style::default().bg(bg),
+                    (None, None) => Style::default(),
+                };
+                spans.push(Span::styled(line_text.to_string(), text_style));
 
                 Line::from(spans)
             })

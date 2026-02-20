@@ -1,6 +1,8 @@
+use crate::config::ColorConfig;
 use crate::model::{FilterSet, LogStorage, VisualLineCache};
 use chrono::Local;
 use crossterm::event::KeyCode;
+use ratatui::style::Color;
 use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, Write};
@@ -63,6 +65,8 @@ pub struct App {
     pub viewport_width: Cell<usize>,
     /// Cache for visual line calculations
     visual_cache: VisualLineCache,
+    /// Color configuration for log lines
+    pub config: Option<ColorConfig>,
 }
 
 impl App {
@@ -88,6 +92,7 @@ impl App {
             viewport_height: Cell::new(20),
             viewport_width: Cell::new(viewport_width),
             visual_cache: VisualLineCache::new(10000, viewport_width),
+            config: ColorConfig::load(),
         }
     }
 
@@ -113,6 +118,13 @@ impl App {
         self.filtered_indices
             .get(idx)
             .and_then(|&log_idx| self.storage.as_ref()?.get_line_info(log_idx)?.timestamp)
+    }
+
+    /// Get the color for a log line based on configuration.
+    ///
+    /// Returns `None` if no config is loaded or no pattern matches.
+    pub fn get_line_color(&self, line: &str) -> Option<Color> {
+        self.config.as_ref()?.get_line_color(line)
     }
 
     /// Start async loading of logs.
