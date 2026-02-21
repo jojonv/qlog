@@ -1,6 +1,6 @@
 use crate::clipboard::Clipboard;
 use crate::config::AppConfig;
-use crate::model::{BMHMatcher, Direction, FilterSet, LogStorage, Selection, VisualLineCache};
+use crate::model::{BMHMatcher, Direction, FilterList, LogStorage, Selection, VisualLineCache};
 use chrono::Local;
 use crossterm::event::KeyCode;
 use lru::LruCache;
@@ -43,8 +43,7 @@ pub struct SearchState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     Normal,
-    Filter,
-    FilterInput,
+    FilterList,
     Command,
     DateRange,
     SearchInput,
@@ -64,8 +63,8 @@ pub struct App {
     pub storage: Option<LogStorage>,
     /// Indices of lines that match current filters
     pub filtered_indices: Vec<usize>,
-    /// Active filters
-    pub filters: FilterSet,
+    /// Active filters (command-based)
+    pub filters: FilterList,
     /// Current UI mode
     pub mode: Mode,
     /// Flag to exit the application
@@ -82,14 +81,10 @@ pub struct App {
     pub loading_status: LoadingStatus,
     /// Receiver for async log loading
     pub log_receiver: Option<Receiver<LogStorage>>,
-    /// Selected filter group index
-    pub selected_group: usize,
-    /// Selected filter index within group
-    pub selected_filter: usize,
+    /// Selected filter index in :list-filters view
+    pub filter_list_selected: usize,
     /// Input buffer for text input
     pub input_buffer: String,
-    /// Flag for creating a new filter group
-    pub pending_new_group: bool,
     /// Whether line wrapping is enabled
     pub wrap_mode: bool,
     /// Viewport height (updated by UI)
@@ -116,7 +111,7 @@ impl App {
         Self {
             storage: None,
             filtered_indices: Vec::new(),
-            filters: FilterSet::new(),
+            filters: FilterList::new(),
             mode: Mode::Normal,
             should_quit: false,
             status_message: String::new(),
@@ -125,10 +120,8 @@ impl App {
             selected_line: 0,
             loading_status: LoadingStatus::Idle,
             log_receiver: None,
-            selected_group: 0,
-            selected_filter: 0,
+            filter_list_selected: 0,
             input_buffer: String::new(),
-            pending_new_group: false,
             wrap_mode: true,
             viewport_height: Cell::new(20),
             viewport_width: Cell::new(viewport_width),
@@ -293,33 +286,11 @@ impl App {
         target_visual.min(self.filtered_len().saturating_sub(1))
     }
 
-    /// Ensure selection is valid after filter changes.
-    fn ensure_valid_selection(&mut self) {
-        if self.filters.groups().is_empty() {
-            self.selected_group = 0;
-            self.selected_filter = 0;
-            return;
-        }
-        self.selected_group = self
-            .selected_group
-            .min(self.filters.groups().len().saturating_sub(1));
-        if let Some(group) = self.filters.groups().get(self.selected_group) {
-            if group.filters().is_empty() {
-                self.selected_filter = 0;
-            } else {
-                self.selected_filter = self
-                    .selected_filter
-                    .min(group.filters().len().saturating_sub(1));
-            }
-        }
-    }
-
     /// Handle keyboard input.
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match self.mode {
-            Mode::FilterInput => self.handle_filter_input_key(key),
             Mode::Command => self.handle_command_key(key),
-            Mode::Filter => self.handle_filter_key(key),
+            Mode::FilterList => self.handle_filter_list_key(key),
             Mode::DateRange => {}
             Mode::Normal => self.handle_normal_key(key),
             Mode::SearchInput => self.handle_search_input_key(key),
@@ -355,50 +326,6 @@ impl App {
         }
     }
 
-    fn handle_filter_input_key(&mut self, key: crossterm::event::KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Filter;
-                self.input_buffer.clear();
-                self.pending_new_group = false;
-            }
-            KeyCode::Enter => {
-                if !self.input_buffer.trim().is_empty() {
-                    if self.pending_new_group {
-                        self.filters.add_group(crate::model::FilterGroup::new());
-                        self.selected_group = self.filters.groups().len().saturating_sub(1);
-                        self.selected_filter = 0;
-                    }
-                    if self.filters.groups().is_empty() {
-                        self.filters.add_group(crate::model::FilterGroup::new());
-                        self.selected_group = 0;
-                        self.selected_filter = 0;
-                    }
-                    if let Some(group) = self.filters.groups_mut().get_mut(self.selected_group) {
-                        group.add_filter(crate::model::Filter::new(self.input_buffer.trim()));
-                    }
-                    self.ensure_valid_selection();
-                    self.selected_filter = self.filters.groups()[self.selected_group]
-                        .filters()
-                        .len()
-                        .saturating_sub(1);
-                    self.update_filtered_logs();
-                    self.clear_search_on_refilter();
-                }
-                self.mode = Mode::Filter;
-                self.input_buffer.clear();
-                self.pending_new_group = false;
-            }
-            KeyCode::Backspace => {
-                self.input_buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                self.input_buffer.push(c);
-            }
-            _ => {}
-        }
-    }
-
     fn handle_command_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -406,8 +333,7 @@ impl App {
                 self.input_buffer.clear();
             }
             KeyCode::Enter => {
-                self.execute_command();
-                self.mode = Mode::Normal;
+                self.mode = self.execute_command();
                 self.input_buffer.clear();
             }
             KeyCode::Backspace => {
@@ -420,20 +346,21 @@ impl App {
         }
     }
 
-    fn execute_command(&mut self) {
+    fn execute_command(&mut self) -> Mode {
         let input = self.input_buffer.trim();
         if input.is_empty() {
-            return;
+            return Mode::Normal;
         }
 
         let (command, filename) = Self::parse_command(input);
+        let filename = filename.to_string(); // Convert to owned String
 
         match command {
             "w" | "write" => {
                 let output_filename = if filename.is_empty() {
                     Self::generate_default_filename()
                 } else {
-                    filename.to_string()
+                    filename
                 };
 
                 match self.write_filtered_logs(&output_filename) {
@@ -445,12 +372,45 @@ impl App {
                         self.status_message = format!("Error: {}", e);
                     }
                 }
+                Mode::Normal
             }
             "q" | "quit" => {
                 self.should_quit = true;
+                Mode::Normal
+            }
+            "filter" => {
+                if !filename.is_empty() {
+                    self.filters.add_include(filename.clone());
+                    self.update_filtered_logs();
+                    self.status_message = format!("Added filter: {}", filename);
+                } else {
+                    self.status_message = "Usage: :filter <text>".to_string();
+                }
+                Mode::Normal
+            }
+            "filter-out" => {
+                if !filename.is_empty() {
+                    self.filters.add_exclude(filename.clone());
+                    self.update_filtered_logs();
+                    self.status_message = format!("Added exclude filter: {}", filename);
+                } else {
+                    self.status_message = "Usage: :filter-out <text>".to_string();
+                }
+                Mode::Normal
+            }
+            "filter-clear" => {
+                self.filters.clear();
+                self.update_filtered_logs();
+                self.status_message = "All filters cleared".to_string();
+                Mode::Normal
+            }
+            "list-filters" => {
+                self.filter_list_selected = 0;
+                Mode::FilterList
             }
             _ => {
                 self.status_message = format!("Unknown command: {}", command);
+                Mode::Normal
             }
         }
     }
@@ -551,9 +511,6 @@ impl App {
             KeyCode::Char('g') if key.modifiers.contains(crossterm::event::KeyModifiers::NONE) => {
                 self.selected_line = 0;
                 self.scroll_offset = 0;
-            }
-            KeyCode::Char('t') => {
-                self.mode = Mode::Filter;
             }
             KeyCode::Char(':') => {
                 self.mode = Mode::Command;
@@ -685,60 +642,37 @@ impl App {
         }
     }
 
-    fn handle_filter_key(&mut self, key: crossterm::event::KeyEvent) {
+    fn handle_filter_list_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(group) = self.filters.groups().get(self.selected_group) {
-                    if self.selected_filter + 1 < group.filters().len() {
-                        self.selected_filter += 1;
-                    }
+                let total = self.filters.len();
+                if self.filter_list_selected + 1 < total {
+                    self.filter_list_selected += 1;
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.selected_filter = self.selected_filter.saturating_sub(1);
+                self.filter_list_selected = self.filter_list_selected.saturating_sub(1);
             }
-            KeyCode::Char('h') | KeyCode::Left => {
-                if self.selected_group > 0 {
-                    self.selected_group -= 1;
-                    self.ensure_valid_selection();
+            KeyCode::Char('d') => {
+                let includes = self.filters.includes().len();
+                if self.filter_list_selected < includes {
+                    self.filters.remove_include(self.filter_list_selected);
+                } else {
+                    self.filters
+                        .remove_exclude(self.filter_list_selected - includes);
                 }
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if self.selected_group + 1 < self.filters.groups().len() {
-                    self.selected_group += 1;
-                    self.ensure_valid_selection();
-                }
-            }
-            KeyCode::Char(' ') => {
-                if let Some(group) = self.filters.groups_mut().get_mut(self.selected_group) {
-                    if let Some(filter) = group.filters_mut().get_mut(self.selected_filter) {
-                        filter.toggle();
-                    }
+                // Ensure selection stays valid after deletion
+                let total = self.filters.len();
+                if self.filter_list_selected >= total && total > 0 {
+                    self.filter_list_selected = total - 1;
                 }
                 self.update_filtered_logs();
                 self.clear_search_on_refilter();
-            }
-            KeyCode::Char('d') => {
-                if !self.filters.groups().is_empty() {
-                    if let Some(group) = self.filters.groups_mut().get_mut(self.selected_group) {
-                        if self.selected_filter < group.filters().len() {
-                            group.remove_filter(self.selected_filter);
-                        }
-                    }
-                    self.ensure_valid_selection();
-                    self.update_filtered_logs();
-                    self.clear_search_on_refilter();
+                if self.filters.is_empty() {
+                    self.mode = Mode::Normal;
                 }
             }
-            KeyCode::Char('F') => {
-                self.pending_new_group = true;
-                self.mode = Mode::FilterInput;
-            }
-            KeyCode::Char('f') => {
-                self.pending_new_group = false;
-                self.mode = Mode::FilterInput;
-            }
-            KeyCode::Char('t') | KeyCode::Esc => {
+            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
                 self.mode = Mode::Normal;
             }
             _ => {}
@@ -836,26 +770,6 @@ impl App {
         }
 
         (total, first_position)
-    }
-
-    /// Recompute total matches when filters change (but keep search query).
-    fn recompute_search_matches(&mut self) {
-        // Extract matcher reference first to avoid borrow issues
-        let matcher_ref = if let Some(state) = &self.search_state {
-            &state.matcher
-        } else {
-            return;
-        };
-
-        let (total, first_position) = self.compute_total_matches(matcher_ref);
-
-        // Now update the state with the computed values
-        if let Some(state) = &mut self.search_state {
-            state.total_matches = total;
-            state.current_idx = 0;
-            state.current_position = first_position;
-            state.match_cache.clear();
-        }
     }
 
     /// Clear search state.

@@ -1,181 +1,93 @@
-## MODIFIED Requirements
+# Filter Groups Capability
 
-### Requirement: Filter navigation only in Filter mode
+## Status
 
-Filter navigation keybindings (j/k for filter selection, h/l for group switching, f/F for adding, d for delete, Space for toggle) SHALL only be active when in Filter mode, not in the default Content mode.
+Current State: **Partially Implemented**
 
-#### Scenario: j/k navigate filters only in Filter mode
-- **WHEN** user is in Content mode and presses `j` or `k`
-- **THEN** system SHALL scroll log content, NOT navigate filters
+## Overview
 
-#### Scenario: h/l switch groups only in Filter mode
-- **WHEN** user is in Content mode and presses `h` or `l`
-- **THEN** system SHALL scroll horizontally, NOT switch filter groups
+Filter groups provide the ability to filter displayed log entries based on user-defined criteria. The filter system uses a hierarchical structure where filters are organized into groups, and multiple groups can be combined with AND logic. Multiple filters within the same group use OR logic - meaning a line must match at least one filter in the group.
 
-#### Scenario: f/F/d/Space operate filters only in Filter mode
-- **WHEN** user is in Content mode and presses `f`, `F`, `d`, or `Space`
-- **THEN** system SHALL NOT perform filter operations
+## Requirements
 
-#### Scenario: All filter operations work in Filter mode
-- **WHEN** user is in Filter mode
-- **THEN** all filter keybindings (j/k/h/l/f/F/d/Space) SHALL work as defined
+### FR-1: Filter Commands
 
----
+The application SHALL support command-based filter management accessible through the Command mode (`:` key).
 
-## ADDED Requirements
+**FR-1.1: Filter-In Command**  
+The application SHALL support the `:filter <pattern>` command to add an include filter. Lines must contain the pattern to be displayed.
 
-### Requirement: Filter groups support OR-within-group AND-between-groups composition
+**FR-1.2: Filter-Out Command**  
+The application SHALL support the `:filter-out <pattern>` command to add an exclude filter. Lines matching the pattern SHALL be hidden.
 
-The system SHALL organize filters into groups where filters within a single group are combined with OR logic, and groups are combined with AND logic.
+**FR-1.3: Filter-Clear Command**  
+The application SHALL support the `:filter-clear` command to remove all active filters.
 
-#### Scenario: Single group with multiple filters matches any filter
-- **WHEN** group contains filters "error" and "warning" (both enabled)
-- **AND** a log line contains "error" but not "warning"
-- **THEN** the log line SHALL match the group
+**FR-1.4: List-Filters Command**  
+The application SHALL support the `:list-filters` command to display all active filters in an interactive list view.
 
-#### Scenario: Multiple groups require match in each group
-- **WHEN** filter set has two groups: group 1 with "error", group 2 with "timeout"
-- **AND** a log line contains "error" but not "timeout"
-- **THEN** the log line SHALL NOT match the filter set
+**FR-1.5: Filter Selection**  
+In the filter list view (triggered by `:list-filters`), the user SHALL be able to navigate filters using `j`/`k` keys and delete the selected filter using the `d` key.
 
-#### Scenario: Disabled filters are ignored in matching
-- **WHEN** group contains filter "error" (enabled) and "warning" (disabled)
-- **AND** a log line contains "warning" but not "error"
-- **THEN** the log line SHALL NOT match the group
+### FR-2: Filter Matching Logic
 
----
+**FR-2.1: Include Filter Logic**  
+When multiple include filters are active, a log entry MUST match ALL include filters to be displayed (AND logic between includes).
 
-### Requirement: Filters use case-insensitive Contains text matching
+**FR-2.2: Exclude Filter Logic**  
+When exclude filters are active, a log entry MUST NOT match ANY exclude filter to be displayed (OR logic between excludes - matching one excludes the entry).
 
-The system SHALL match filters against the raw log line text using case-insensitive substring search.
+**FR-2.3: Combined Logic**  
+The overall filter logic SHALL be: `(matches ALL includes) AND (matches NO excludes)`.
 
-#### Scenario: Contains match is case-insensitive
-- **WHEN** filter text is "ERROR"
-- **AND** log line contains "error" (lowercase)
-- **THEN** the filter SHALL match the log line
+**FR-2.4: Case-Insensitive Matching**  
+All text-based filter matching SHALL be case-insensitive.
 
-#### Scenario: Contains match finds substring anywhere
-- **WHEN** filter text is "timeout"
-- **AND** log line is "Connection timeout after 30s"
-- **THEN** the filter SHALL match the log line
+**FR-2.5: Substring Matching**  
+Filter patterns SHALL match substrings within log entries (not requiring full-line matches).
 
----
+## Dependencies
 
-### Requirement: Log entries store raw text with optional detected timestamp
+- Requires: Log Storage and Display System (to filter displayed entries)
+- Future Enhancement: Date/Time filtering capabilities
+- Future Enhancement: Regex pattern support
 
-The system SHALL store each log entry as raw text with an optional auto-detected timestamp.
+## Visual Design
 
-#### Scenario: Timestamp detected from common formats
-- **WHEN** log line starts with "2026-02-17T14:30:00"
-- **THEN** the entry SHALL have timestamp parsed as DateTime
+**Status Bar Integration:**  
+The filter status SHALL be displayed in the status bar, showing the number of active filters.
 
-#### Scenario: Missing timestamp results in None
-- **WHEN** log line has no recognizable timestamp pattern
-- **THEN** the entry SHALL have timestamp of None
+**Filter List Popup:**  
+The `:list-filters` command SHALL display a centered popup overlay with:
+- Title: "Filter List"
+- List of active filters showing kind (INCLUDE/EXCLUDE) and pattern
+- Current selection indicator
+- Help text for navigation keys
 
----
+## Future Enhancements
 
-### Requirement: Helix-style keybindings for filter management
+- **FR-3.1:** Date/time range filtering with `after:` and `before:` qualifiers
+- **FR-3.2:** Regex pattern matching support
+- **FR-3.3:** Filter persistence across sessions
+- **FR-3.4:** Named filters for quick recall
 
-The system SHALL provide the following keybindings for filter interaction:
+## Changelog
 
-#### Scenario: Add filter opens command-line input
-- **WHEN** user presses `f` in filter mode
-- **THEN** system SHALL display command-line prompt at bottom
-- **AND** user SHALL be able to type filter text
+### 2026-02-21
 
-#### Scenario: Confirm input creates filter
-- **WHEN** user types text in command-line and presses Enter
-- **THEN** system SHALL add new filter with that text to current group
+**Breaking Change:** Reworked filter system from visual group-based to command-based approach.
 
-#### Scenario: Shift+f creates new group
-- **WHEN** user presses Shift+f
-- **THEN** system SHALL create a new filter group
-- **AND** subsequent filter addition goes to new group
+**Removed:**
+- Visual filter mode (`t` key)
+- Filter group navigation (h/l keys)
+- Filter toggle (space key)
+- Filter input mode for visual editing
 
-#### Scenario: Delete removes selected filter
-- **WHEN** user presses `d` with a filter selected
-- **THEN** system SHALL remove that filter from its group
-- **AND** if group becomes empty, remove the group
+**Added:**
+- Command-based filter management (`:filter`, `:filter-out`, `:filter-clear`, `:list-filters`)
+- FilterList mode for interactive filter management
+- Simplified filter logic: includes (AND) + excludes (OR NOT)
 
-#### Scenario: Space toggles filter enabled state
-- **WHEN** user presses Space with a filter selected
-- **THEN** system SHALL toggle the filter's enabled state
-
-#### Scenario: h/l navigate between groups
-- **WHEN** user presses `h` or `l`
-- **THEN** system SHALL move selection to previous or next group
-
-#### Scenario: j/k navigate within group
-- **WHEN** user presses `j` or `k`
-- **THEN** system SHALL move selection up or down within current group
-
----
-
-### Requirement: No auto-filters on startup
-
-The system SHALL start with an empty filter set, applying no automatic filters.
-
-#### Scenario: Fresh start shows all logs
-- **WHEN** application starts
-- **THEN** filter set SHALL be empty
-- **AND** all log entries SHALL be visible
-
----
-
-### Requirement: Filter bar displays groups with visual separation
-
-The system SHALL render the filter bar with visual distinction between groups.
-
-#### Scenario: Groups visually separated
-- **WHEN** filter set contains multiple groups
-- **THEN** filter bar SHALL display groups with separators (e.g., `|` or spacing)
-
-#### Scenario: Disabled filters shown grayed
-- **WHEN** a filter is disabled
-- **THEN** filter chip SHALL be displayed with muted/strikethrough styling
-
----
-
-## ADDED Requirements
-
-### Requirement: Index-based filtering storage
-
-The system SHALL store filtered log results as indices into the main log vector rather than cloned entries.
-
-#### Scenario: Filter update creates indices not clones
-- **WHEN** user applies or modifies a filter
-- **THEN** the system stores matching entry indices in `filtered_indices: Vec<usize>`
-- **AND** no LogEntry clones are created
-
-#### Scenario: Filtered entry access via index
-- **WHEN** UI or command needs to access a filtered entry
-- **THEN** the system retrieves the entry via `logs[filtered_indices[position]]`
-- **AND** returns a reference to the original LogEntry
-
-### Requirement: Memory-efficient filter operations
-
-The system SHALL provide O(n) filter application with O(1) per-entry memory overhead (8 bytes per index).
-
-#### Scenario: Filter memory overhead
-- **WHEN** filtering 1 million log entries
-- **THEN** filtered storage uses approximately 8MB for indices
-- **AND** does NOT duplicate log content strings
-
-#### Scenario: Filter update performance
-- **WHEN** user toggles a filter on/off
-- **THEN** filter indices are recalculated without cloning
-- **AND** memory usage remains stable (no spikes)
-
-### Requirement: Backward-compatible API surface
-
-The system SHALL maintain semantic compatibility for all `filtered_logs` operations via accessor methods.
-
-#### Scenario: Length queries work identically
-- **WHEN** code queries `filtered_logs.len()`
-- **THEN** equivalent result is available via `filtered_len()` method
-
-#### Scenario: Iteration works via accessor
-- **WHEN** code iterates filtered entries
-- **THEN** iteration yields references to original LogEntry instances
-- **AND** entry order matches filter result order
+**Changed:**
+- Filter matching now uses case-insensitive substring matching with Boyer-Moore-Horspool algorithm
+- Performance optimized with thread-local buffers for case conversion
