@@ -1,6 +1,6 @@
 ## Why
 
-Log files are hard to scan visually, especially when searching for specific patterns like errors, warnings, or custom markers. Currently, como-log-viewer only colors timestamps (cyan) and selected lines (dark gray). Users need a configurable way to highlight entire log lines based on patterns, making it easier to visually identify important information at a glance.
+Log files are hard to scan visually, especially when searching for specific patterns like errors, warnings, or custom markers. Currently, qlog only colors timestamps (cyan) and selected lines (dark gray). Users need a configurable way to highlight entire log lines based on patterns, making it easier to visually identify important information at a glance.
 
 ## What Changes
 

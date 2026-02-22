@@ -13,7 +13,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use walkdir::WalkDir;
 
-use como_log_viewer::{
+use qlog::{
     app::{App, LoadingStatus},
     model::LogStorage,
     storage::loader::LogLoader,
@@ -363,7 +363,7 @@ fn run_app(
             }
         }
 
-        terminal.draw(|f| como_log_viewer::ui::draw(f, app))?;
+        terminal.draw(|f| qlog::ui::draw(f, app))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())

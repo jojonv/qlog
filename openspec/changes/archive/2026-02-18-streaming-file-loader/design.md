@@ -1,6 +1,6 @@
 ## Context
 
-The como-log-viewer is a TUI application for analyzing log files. Currently, it:
+The qlog is a TUI application for analyzing log files. Currently, it:
 1. Collects all matching file paths using `glob::glob()` into a Vec
 2. Passes paths to a background thread
 3. Loads each file sequentially using BufReader

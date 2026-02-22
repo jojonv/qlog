@@ -1,4 +1,4 @@
-use como_log_viewer::model::LogStorage;
+use qlog::model::LogStorage;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

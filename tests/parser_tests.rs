@@ -1,5 +1,5 @@
-use como_log_viewer::model::timestamp::detect_timestamp;
-use como_log_viewer::model::LogEntry;
+use qlog::model::timestamp::detect_timestamp;
+use qlog::model::LogEntry;
 
 #[test]
 fn test_parse_log_entry_with_timestamp() {

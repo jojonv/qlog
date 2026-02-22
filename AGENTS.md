@@ -1,4 +1,4 @@
-# AGENTS.md - Coding Guidelines for como-log-viewer
+# AGENTS.md - Coding Guidelines for qlog
 
 ## Project Overview
 
@@ -15,7 +15,7 @@ cargo build
 cargo build --release
 
 # Binary location after build
-target/release/como-log-viewer
+target/release/qlog
 ```
 
 ## Test Commands
@@ -146,7 +146,7 @@ mod tests {
 
 // Integration tests (in tests/ directory)
 // tests/filter_tests.rs uses standard patterns:
-// use como_log_viewer::model::{Filter, FilterSet};
+// use qlog::model::{Filter, FilterSet};
 ```
 
 ## Project-Specific Conventions

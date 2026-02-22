@@ -151,30 +151,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "como-log-viewer"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "atty",
- "chrono",
- "crossterm",
- "dirs",
- "libc",
- "lru",
- "memmap2",
- "ratatui",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-test",
- "toml",
- "walkdir",
-]
-
-[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -824,6 +800,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7186d3822593aa4393561d186d1393b3923e9d6163d3fbfd6e825e3e6cf3e6a8"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "qlog"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "atty",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "libc",
+ "lru",
+ "memmap2",
+ "ratatui",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-test",
+ "toml",
+ "walkdir",
 ]
 
 [[package]]

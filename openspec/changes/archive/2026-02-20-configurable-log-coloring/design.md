@@ -1,6 +1,6 @@
 ## Context
 
-The como-log-viewer is a Rust TUI application built with ratatui that displays log files. Currently, it only applies minimal coloring: timestamps are cyan and the selected line has a dark gray background. Users need a way to visually highlight important log patterns.
+The qlog is a Rust TUI application built with ratatui that displays log files. Currently, it only applies minimal coloring: timestamps are cyan and the selected line has a dark gray background. Users need a way to visually highlight important log patterns.
 
 The application uses memory-mapped file access for efficient large file handling and renders lines through ratatui's `Paragraph` and `Line` widgets. The UI rendering logic is centralized in `src/ui/mod.rs`.
 

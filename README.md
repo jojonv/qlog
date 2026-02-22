@@ -1,4 +1,4 @@
-# Como Log Viewer
+# qlog
 
 A TUI (Terminal User Interface) application for viewing and filtering como-data-center log files with Helix-style keybindings.
 
@@ -16,20 +16,20 @@ A TUI (Terminal User Interface) application for viewing and filtering como-data-
 ## Installation
 
 ```bash
-cd como-log-viewer
+cd qlog
 cargo build --release
 ```
 
-The binary will be at `target/release/como-log-viewer`.
+The binary will be at `target/release/qlog`.
 
 ## Usage
 
 ```bash
 # Automatically find *.log files in current directory
-./como-log-viewer
+./qlog
 
 # Or specify specific log files
-./como-log-viewer /path/to/*.log
+./qlog /path/to/*.log
 ```
 
 ## Keybindings

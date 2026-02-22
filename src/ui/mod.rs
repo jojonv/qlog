@@ -490,7 +490,7 @@ fn draw_loading_screen(frame: &mut Frame, current: usize, total: usize, entries:
 
     let loading_text = Text::from(vec![
         Line::from(vec![Span::styled(
-            "Loading Como Log Viewer...",
+            "Loading qlog...",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
