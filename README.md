@@ -5,13 +5,16 @@ A TUI (Terminal User Interface) application for viewing and filtering como-data-
 ## Features
 
 - **Unified Log View**: Merge all log files chronologically with auto-detected timestamps
-- **Filter Groups**: Compose filters with OR-within-group, AND-between-groups logic
-- **Helix Keybindings**: Modal editing with hjkl navigation and filter management
+- **Filters**: Include/exclude filters with case-insensitive substring matching
+- **Search**: Incremental search with `n`/`N` navigation and match highlighting
+- **Selection & Yank**: Select lines with `x` and copy to clipboard with `y`
+- **Helix Keybindings**: Modal editing with hjkl navigation and `:` command mode
 - **Generic Log Support**: Works with any text log format (not just JSON)
 - **Async Loading**: Efficient loading for large datasets
 - **Virtual Scrolling**: Handle millions of lines with only visible lines rendered
 - **Horizontal Scroll**: View wide log content with wrap mode toggle
 - **Configurable Log Coloring**: Customize line colors via TOML config files
+- **Export**: Save filtered results to file with `:write` command
 
 ## Installation
 
@@ -40,39 +43,51 @@ The binary will be at `target/release/qlog`.
 - `g` - Go to top
 - `G` - Go to bottom
 - `w` - Toggle wrap mode
-- `t` - Enter filter mode
-- `q` - Quit application
+- `:` - Enter command mode
+- `/` - Enter search mode
+- `n` - Next search match
+- `N` - Previous search match
+- `x` - Start/extend line selection
+- `y` - Yank (copy) selected lines to clipboard
+- `Esc` - Clear selection
+- `q` - Quit application (or `:q` / `:quit` in command mode)
 
-### Filter Mode
-- `f` - Add filter to current group (opens input)
-- `F` (Shift+f) - Create new group and add filter
-- `j/k` - Select filter within group
-- `h/l` - Switch between groups
-- `Space` - Toggle filter on/off
-- `d` - Delete selected filter
-- `t` or `Esc` - Return to normal mode
-
-### Filter Input Mode
-- `Enter` - Confirm filter text
-- `Esc` - Cancel input
+### Command Mode (`:`)
+- `filter <text>` - Add include filter
+- `filter-out <text>` - Add exclude filter
+- `filter-clear` - Clear all filters
+- `list-filters` - Show filter list view
+- `write [filename]` or `w [filename]` - Save filtered logs to file
+- `quit` or `q` - Quit application
+- `Enter` - Execute command
+- `Esc` - Cancel and return to normal mode
 - `Backspace` - Delete character
 
-## Filter Groups
+### Filter List Mode
+- `j/k` or `Arrow Up/Down` - Select filter
+- `d` - Delete selected filter
+- `Enter` / `Esc` / `q` - Return to normal mode
 
-Filters are organized into groups with powerful composition:
+### Search Input Mode (`/`)
+- `Enter` - Execute search
+- `Esc` - Cancel and return to normal mode
+- `Backspace` - Delete character
 
-- **Filters within a group** are combined with **OR** logic
-- **Groups** are combined with **AND** logic
+## Filters
 
-Example: `("error" OR "warning") AND ("timeout" OR "retry")`
+qlog supports include and exclude filters:
 
-This creates two groups:
-1. Group 1: `error` OR `warning`
-2. Group 2: `timeout` OR `retry`
-
-A log line must match at least one filter from each group to be shown.
+- **Include filters**: Lines must contain at least one include filter text (OR logic between multiple includes)
+- **Exclude filters**: Lines containing any exclude filter text are hidden
+- Filters are combined as: `(include1 OR include2) AND NOT (exclude1 OR exclude2)
 
 Filter matching is **case-insensitive** substring search against the raw log line.
+
+Add filters via command mode (`:`):
+- `:filter <text>` - Add include filter
+- `:filter-out <text>` - Add exclude filter
+- `:filter-clear` - Remove all filters
+- `:list-filters` - View and manage active filters
 
 ## Log Coloring
 
@@ -110,18 +125,26 @@ Extended: `dark_gray`, `light_red`, `light_green`, `light_blue`, `light_yellow`,
 
 ```
 src/
-├── main.rs           # Entry point and CLI args
-├── lib.rs            # Library exports
-├── app.rs            # Application state and key handling
-├── config.rs         # Log coloring configuration
+├── main.rs              # Entry point and CLI args
+├── lib.rs               # Library exports
+├── app.rs               # Application state and key handling
+├── clipboard.rs         # Clipboard integration for copy operations
+├── config.rs            # Log coloring configuration
 ├── model/
-│   ├── log_entry.rs  # Log entry (raw text + optional timestamp)
-│   ├── filter.rs     # Filter/FilterGroup/FilterSet with OR/AND logic
-│   └── timestamp.rs  # Timestamp detection from log lines
+│   ├── log_entry.rs     # Log entry (raw text + optional timestamp)
+│   ├── filter.rs        # FilterList with include/exclude logic
+│   ├── timestamp.rs     # Timestamp detection from log lines
+│   ├── mmap_str.rs      # Memory-mapped string wrapper
+│   ├── line_info.rs     # Line position tracking for log files
+│   ├── log_storage.rs   # Memory-mapped log storage with indexing
+│   ├── visual_line_cache.rs  # Visual line calculation caching
+│   ├── selection.rs     # Line selection state management
+│   └── mod.rs           # Model module exports
 ├── storage/
-│   └── loader.rs     # Log file loading
+│   ├── loader.rs        # Log file loading
+│   └── mod.rs           # Storage module exports
 └── ui/
-    └── mod.rs        # TUI rendering (filter bar, log list, status)
+    └── mod.rs           # TUI rendering (filter bar, log list, status)
 ```
 
 ## Testing
@@ -131,10 +154,15 @@ cargo test
 ```
 
 Tests cover:
-- Filter matching logic (OR within groups, AND between groups)
+- Filter matching logic (include/exclude filters)
 - Case-insensitive text matching
 - Timestamp detection from various formats
 - Log loading from files
+- Memory-mapped string operations
+- Visual line calculation caching
+- Selection state management
+- Configuration parsing
+- Search matching with Boyer-Moore-Horspool algorithm
 
 ## Performance
 
