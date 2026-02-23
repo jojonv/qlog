@@ -1,7 +1,17 @@
 [package]
-name = "qlog"
+name = "qlog-tui"
 version = "0.1.0"
 edition = "2021"
+description = "TUI log viewer with Helix-style keybindings for viewing and filtering large log files"
+license = "MIT"
+repository = "https://github.com/jojonv/qlog"
+authors = ["jojonv <novakj@outlook.com>"]
+keywords = ["log", "viewer", "tui", "cli", "filter"]
+categories = ["command-line-utilities", "development-tools::debugging"]
+readme = "README.md"
+
+[lib]
+name = "qlog"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }

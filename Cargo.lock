@@ -803,7 +803,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qlog"
+name = "qlog-tui"
 version = "0.1.0"
 dependencies = [
  "arboard",
