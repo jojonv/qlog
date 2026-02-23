@@ -32,6 +32,18 @@ The system SHALL only complete the command name (text before first space).
 - **WHEN** user presses Tab with empty input buffer
 - **THEN** input buffer shows "filter" (first command alphabetically)
 
+### Requirement: Shortcuts excluded from completion
+
+The system SHALL NOT include command shortcuts in autocomplete suggestions. Only full command names are completed.
+
+#### Scenario: Shortcut not completed
+- **WHEN** user types "q" and presses Tab
+- **THEN** input buffer remains unchanged (no match, "q" is a shortcut not a full command)
+
+#### Scenario: Full command completed instead
+- **WHEN** user types "qu" and presses Tab
+- **THEN** input buffer updates to "quit" (full command name)
+
 ### Requirement: Completion resets on non-Tab input
 
 The system SHALL reset the completion cycle when user types any non-Tab character.

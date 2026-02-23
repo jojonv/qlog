@@ -1,7 +1,9 @@
 use crate::clipboard::Clipboard;
+use crate::command::{self, CommandEffect};
 use crate::config::AppConfig;
-use crate::model::{BMHMatcher, Direction, FilterList, LogStorage, Selection, VisualLineCache};
-use chrono::Local;
+use crate::model::{
+    BMHMatcher, Direction, FilterKind, FilterList, LogStorage, Selection, VisualLineCache,
+};
 use crossterm::event::KeyCode;
 use lru::LruCache;
 use ratatui::style::Color;
@@ -103,6 +105,10 @@ pub struct App {
     pub selection: Selection,
     /// System clipboard wrapper (may be None on headless systems)
     pub clipboard: Option<Clipboard>,
+    /// Index for cycling through command completions (None when not completing)
+    pub completion_index: Option<usize>,
+    /// Original prefix for completion (stored to enable cycling)
+    completion_prefix: String,
 }
 
 impl App {
@@ -131,6 +137,35 @@ impl App {
             search_state: None,
             selection: Selection::new(),
             clipboard: Clipboard::new().ok(),
+            completion_index: None,
+            completion_prefix: String::new(),
+        }
+    }
+
+    /// Apply the next completion from the matching commands list.
+    /// Cycles through matches and wraps around when reaching the end.
+    pub fn apply_completion(&mut self) {
+        if self.completion_index.is_none() {
+            self.completion_prefix = self
+                .input_buffer
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+
+        let idx = self.completion_index.map_or(0, |i| i + 1);
+
+        if let Some((completed, new_idx)) = command::complete(&self.completion_prefix, idx) {
+            self.completion_index = Some(new_idx);
+
+            let args = self
+                .input_buffer
+                .split_once(' ')
+                .map(|(_, rest)| format!(" {}", rest))
+                .unwrap_or_default();
+
+            self.input_buffer = format!("{}{}", completed, args);
         }
     }
 
@@ -337,113 +372,59 @@ impl App {
                 self.input_buffer.clear();
             }
             KeyCode::Backspace => {
+                self.completion_index = None;
+                self.completion_prefix.clear();
                 self.input_buffer.pop();
             }
             KeyCode::Char(c) => {
+                self.completion_index = None;
+                self.completion_prefix.clear();
                 self.input_buffer.push(c);
+            }
+            KeyCode::Tab => {
+                self.apply_completion();
             }
             _ => {}
         }
     }
 
     fn execute_command(&mut self) -> Mode {
-        let input = self.input_buffer.trim();
-        if input.is_empty() {
-            return Mode::Normal;
-        }
+        let result = command::parse(&self.input_buffer);
+        self.status_message = result.status;
 
-        let (command, filename) = Self::parse_command(input);
-        let filename = filename.to_string(); // Convert to owned String
-
-        match command {
-            "w" | "write" => {
-                let output_filename = if filename.is_empty() {
-                    Self::generate_default_filename()
-                } else {
-                    filename
-                };
-
-                match self.write_filtered_logs(&output_filename) {
-                    Ok(count) => {
-                        self.status_message =
-                            format!("Saved {} lines to {}", count, output_filename);
+        if let Some(effect) = result.effect {
+            match effect {
+                CommandEffect::Quit => {
+                    self.should_quit = true;
+                }
+                CommandEffect::AddFilter { kind, pattern } => {
+                    match kind {
+                        FilterKind::Include => self.filters.add_include(&pattern),
+                        FilterKind::Exclude => self.filters.add_exclude(&pattern),
                     }
-                    Err(e) => {
-                        self.status_message = format!("Error: {}", e);
+                    self.update_filtered_logs();
+                }
+                CommandEffect::ClearFilters => {
+                    self.filters.clear();
+                    self.update_filtered_logs();
+                }
+                CommandEffect::WriteFilteredLogs { filename } => {
+                    match self.write_filtered_logs(&filename) {
+                        Ok(count) => {
+                            self.status_message = format!("Saved {} lines to {}", count, filename);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Error: {}", e);
+                        }
                     }
                 }
-                Mode::Normal
-            }
-            "q" | "quit" => {
-                self.should_quit = true;
-                Mode::Normal
-            }
-            "filter" => {
-                if !filename.is_empty() {
-                    self.filters.add_include(filename.clone());
-                    self.update_filtered_logs();
-                    self.status_message = format!("Added filter: {}", filename);
-                } else {
-                    self.status_message = "Usage: :filter <text>".to_string();
+                CommandEffect::ListFilters => {
+                    self.filter_list_selected = 0;
+                    return Mode::FilterList;
                 }
-                Mode::Normal
-            }
-            "filter-out" => {
-                if !filename.is_empty() {
-                    self.filters.add_exclude(filename.clone());
-                    self.update_filtered_logs();
-                    self.status_message = format!("Added exclude filter: {}", filename);
-                } else {
-                    self.status_message = "Usage: :filter-out <text>".to_string();
-                }
-                Mode::Normal
-            }
-            "filter-clear" => {
-                self.filters.clear();
-                self.update_filtered_logs();
-                self.status_message = "All filters cleared".to_string();
-                Mode::Normal
-            }
-            "list-filters" => {
-                self.filter_list_selected = 0;
-                Mode::FilterList
-            }
-            _ => {
-                self.status_message = format!("Unknown command: {}", command);
-                Mode::Normal
             }
         }
-    }
-
-    fn parse_command(input: &str) -> (&str, &str) {
-        let input = input.trim();
-
-        if input.starts_with('"') {
-            if let Some(end_quote) = input[1..].find('"') {
-                let filename = &input[1..end_quote + 1];
-                let rest = &input[end_quote + 2..].trim_start();
-                if let Some(space_pos) = rest.find(' ') {
-                    let cmd = &rest[..space_pos];
-                    return (cmd, filename);
-                }
-                return (rest, filename);
-            }
-        }
-
-        let parts: Vec<&str> = input.splitn(2, ' ').collect();
-        if parts.len() == 2 {
-            let filename = parts[1].trim();
-            if filename.starts_with('"') && filename.ends_with('"') && filename.len() > 1 {
-                return (parts[0], &filename[1..filename.len() - 1]);
-            }
-            (parts[0], filename)
-        } else {
-            (parts[0], "")
-        }
-    }
-
-    fn generate_default_filename() -> String {
-        format!("filtered-logs-{}.log", Local::now().format("%Y%m%d-%H%M%S"))
+        Mode::Normal
     }
 
     fn write_filtered_logs(&self, filename: &str) -> io::Result<usize> {
@@ -1044,16 +1025,6 @@ mod tests {
 
         let line = app.get_line(1).unwrap();
         assert_eq!(line.as_str_lossy().trim(), "Line 2");
-    }
-
-    #[test]
-    fn test_parse_command() {
-        assert_eq!(App::parse_command("write file.log"), ("write", "file.log"));
-        assert_eq!(App::parse_command("w"), ("w", ""));
-        assert_eq!(
-            App::parse_command("  write   file.log  "),
-            ("write", "file.log")
-        );
     }
 
     #[test]

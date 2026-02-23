@@ -7,7 +7,7 @@ pub mod selection;
 pub mod timestamp;
 pub mod visual_line_cache;
 
-pub use filter::{BMHMatcher, FilterList};
+pub use filter::{BMHMatcher, FilterKind, FilterList};
 pub use line_info::LineInfo;
 pub use log_entry::LogEntry;
 pub use log_storage::LogStorage;
