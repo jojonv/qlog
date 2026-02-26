@@ -1,4 +1,5 @@
-use crate::app::{App, LoadingStatus, Mode};
+use crate::app::{App, LoadingStatus};
+use crate::key_bindings::Mode;
 use crate::model::filter::FilterKind;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -426,7 +427,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Mode::Normal => "CONTENT",
         Mode::FilterList => "FILTERS",
         Mode::Command => "COMMAND",
-        Mode::DateRange => "DATE",
         Mode::SearchInput => "SEARCH",
     };
 
@@ -434,7 +434,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Mode::Normal => "j/k: Scroll | h/l: H-scroll | w: Wrap | g/G: Top/Bottom | /: Search | n/N: Next/Prev match | q: Quit",
         Mode::FilterList => "j/k: Select filter | d: Delete | q: Close",
         Mode::Command => "Enter: Execute | Esc: Cancel",
-        Mode::DateRange => "Date range mode (unused)",
         Mode::SearchInput => "Enter: Execute search | Esc: Cancel | Backspace: Delete char",
     };
 
@@ -442,7 +441,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Mode::Normal => Style::default().fg(Color::Green),
         Mode::FilterList => Style::default().fg(Color::Cyan),
         Mode::Command => Style::default().fg(Color::Magenta),
-        Mode::DateRange => Style::default().fg(Color::Red),
         Mode::SearchInput => Style::default().fg(Color::Yellow),
     };
 

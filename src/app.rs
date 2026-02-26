@@ -1,15 +1,15 @@
 use crate::clipboard::Clipboard;
 use crate::command::{self, CommandEffect};
 use crate::config::AppConfig;
+use crate::key_bindings::{Mode, Msg};
 use crate::model::{
     BMHMatcher, Direction, FilterKind, FilterList, LogStorage, Selection, VisualLineCache,
 };
-use crossterm::event::KeyCode;
 use lru::LruCache;
 use ratatui::style::Color;
 use std::cell::Cell;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -40,15 +40,6 @@ pub struct SearchState {
     /// Cache of matches per line index (filtered_indices index)
     /// Key: filtered line index, Value: Vec of (byte_start, byte_end)
     pub match_cache: LruCache<usize, Vec<(usize, usize)>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Mode {
-    Normal,
-    FilterList,
-    Command,
-    DateRange,
-    SearchInput,
 }
 
 #[derive(Debug, Clone)]
@@ -321,71 +312,174 @@ impl App {
         target_visual.min(self.filtered_len().saturating_sub(1))
     }
 
-    /// Handle keyboard input.
+    /// Handle keyboard input by translating to messages and processing them.
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        match self.mode {
-            Mode::Command => self.handle_command_key(key),
-            Mode::FilterList => self.handle_filter_list_key(key),
-            Mode::DateRange => {}
-            Mode::Normal => self.handle_normal_key(key),
-            Mode::SearchInput => self.handle_search_input_key(key),
+        use crate::key_bindings::translate;
+        if let Some(msg) = translate(key, self.mode) {
+            self.process_message(msg);
         }
     }
 
-    fn handle_search_input_key(&mut self, key: crossterm::event::KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
-                self.input_buffer.clear();
-            }
-            KeyCode::Enter => {
-                if self.input_buffer.trim().is_empty() {
-                    // Empty query clears search
-                    self.clear_search();
+    /// Process a message and update application state accordingly.
+    fn process_message(&mut self, msg: Msg) {
+        match msg {
+            // Navigation
+            Msg::ScrollDown => self.on_scroll_down(),
+            Msg::ScrollUp => self.on_scroll_up(),
+            Msg::ScrollRight => self.on_scroll_right(),
+            Msg::ScrollLeft => self.on_scroll_left(),
+            Msg::GoToBottom => self.on_go_to_bottom(),
+            Msg::GoToTop => self.on_go_to_top(),
+
+            // Command mode
+            Msg::EnterCommand => self.on_enter_command(),
+            Msg::CancelCommand => self.on_cancel_command(),
+            Msg::SubmitCommand => self.on_submit_command(),
+            Msg::CommandTypeChar(c) => self.on_command_type_char(c),
+            Msg::CommandBackspace => self.on_command_backspace(),
+            Msg::CommandComplete => self.on_command_complete(),
+
+            // Search
+            Msg::EnterSearch => self.on_enter_search(),
+            Msg::CancelSearch => self.on_cancel_search(),
+            Msg::SubmitSearch => self.on_submit_search(),
+            Msg::SearchTypeChar(c) => self.on_search_type_char(c),
+            Msg::SearchBackspace => self.on_search_backspace(),
+            Msg::NextMatch => self.next_match(),
+            Msg::PrevMatch => self.prev_match(),
+            Msg::ClearSearch => self.on_clear_search(),
+
+            // Selection
+            Msg::ToggleSelection => self.on_toggle_selection(),
+            Msg::YankSelection => self.on_yank(),
+            Msg::ClearSelection => self.on_clear_selection(),
+
+            // Filter list
+            Msg::FilterListDown => self.on_filter_list_down(),
+            Msg::FilterListUp => self.on_filter_list_up(),
+            Msg::DeleteSelectedFilter => self.on_delete_selected_filter(),
+            Msg::CloseFilterList => self.on_close_filter_list(),
+
+            // View options
+            Msg::ToggleWrap => self.on_toggle_wrap(),
+
+            // Application
+            Msg::Quit => self.should_quit = true,
+            // Keys that don't map to an action in the current mode (e.g., unmapped keys in Normal mode)
+            Msg::NoOp => {}
+        }
+    }
+
+    // Navigation handlers
+
+    fn on_scroll_down(&mut self) {
+        self.status_message.clear();
+        if self.selected_line < self.filtered_len().saturating_sub(1) {
+            let old_line = self.selected_line;
+            self.selected_line += 1;
+            // Extend selection if active
+            if self.selection.is_active() {
+                let direction = if self.selected_line > old_line {
+                    Direction::Down
                 } else {
-                    // Execute search with non-empty query
-                    let query = self.input_buffer.trim().to_string();
-                    self.search_query = Some(query.clone());
-                    self.init_search_state(query);
-                }
-                self.mode = Mode::Normal;
-                self.input_buffer.clear();
+                    Direction::Up
+                };
+                self.selection.extend(self.selected_line, direction);
             }
-            KeyCode::Backspace => {
-                self.input_buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                self.input_buffer.push(c);
-            }
-            _ => {}
+        }
+        self.clamp_scroll();
+    }
+
+    fn on_scroll_up(&mut self) {
+        self.status_message.clear();
+        let old_line = self.selected_line;
+        self.selected_line = self.selected_line.saturating_sub(1);
+        // Extend selection if active
+        if self.selection.is_active() {
+            let direction = if self.selected_line < old_line {
+                Direction::Up
+            } else {
+                Direction::Down
+            };
+            self.selection.extend(self.selected_line, direction);
+        }
+        self.clamp_scroll();
+    }
+
+    fn on_scroll_right(&mut self) {
+        self.horizontal_scroll = self.horizontal_scroll.saturating_add(4);
+    }
+
+    fn on_scroll_left(&mut self) {
+        self.horizontal_scroll = self.horizontal_scroll.saturating_sub(4);
+    }
+
+    fn on_go_to_bottom(&mut self) {
+        self.selected_line = self.filtered_len().saturating_sub(1);
+        self.clamp_scroll();
+    }
+
+    fn on_go_to_top(&mut self) {
+        self.selected_line = 0;
+        self.scroll_offset = 0;
+    }
+
+    fn clamp_scroll(&mut self) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+
+        self.selected_line = self
+            .selected_line
+            .min(self.filtered_len().saturating_sub(1));
+
+        let viewport_height = self.viewport_height.get();
+
+        let effective_height = if self.wrap_mode {
+            (viewport_height / 2).max(1)
+        } else {
+            viewport_height
+        };
+
+        if self.selected_line < self.scroll_offset {
+            self.scroll_offset = self.selected_line;
+        } else if self.selected_line >= self.scroll_offset + effective_height {
+            self.scroll_offset = self
+                .selected_line
+                .saturating_sub(effective_height.saturating_sub(1));
         }
     }
 
-    fn handle_command_key(&mut self, key: crossterm::event::KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
-                self.input_buffer.clear();
-            }
-            KeyCode::Enter => {
-                self.mode = self.execute_command();
-                self.input_buffer.clear();
-            }
-            KeyCode::Backspace => {
-                self.completion_index = None;
-                self.completion_prefix.clear();
-                self.input_buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                self.completion_index = None;
-                self.completion_prefix.clear();
-                self.input_buffer.push(c);
-            }
-            KeyCode::Tab => {
-                self.apply_completion();
-            }
-            _ => {}
-        }
+    // Command mode handlers
+
+    fn on_enter_command(&mut self) {
+        self.mode = Mode::Command;
+    }
+
+    fn on_cancel_command(&mut self) {
+        self.mode = Mode::Normal;
+        self.input_buffer.clear();
+    }
+
+    fn on_submit_command(&mut self) {
+        self.mode = self.execute_command();
+        self.input_buffer.clear();
+    }
+
+    fn on_command_type_char(&mut self, c: char) {
+        self.completion_index = None;
+        self.completion_prefix.clear();
+        self.input_buffer.push(c);
+    }
+
+    fn on_command_backspace(&mut self) {
+        self.completion_index = None;
+        self.completion_prefix.clear();
+        self.input_buffer.pop();
+    }
+
+    fn on_command_complete(&mut self) {
+        self.apply_completion();
     }
 
     fn execute_command(&mut self) -> Mode {
@@ -427,7 +521,7 @@ impl App {
         Mode::Normal
     }
 
-    fn write_filtered_logs(&self, filename: &str) -> io::Result<usize> {
+    fn write_filtered_logs(&self, filename: &str) -> std::io::Result<usize> {
         let mut file = File::create(filename)?;
         let mut count = 0;
 
@@ -445,110 +539,75 @@ impl App {
         Ok(count)
     }
 
-    fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.status_message.clear();
-                if self.selected_line < self.filtered_len().saturating_sub(1) {
-                    let old_line = self.selected_line;
-                    self.selected_line += 1;
-                    // Extend selection if active
-                    if self.selection.is_active() {
-                        let direction = if self.selected_line > old_line {
-                            Direction::Down
-                        } else {
-                            Direction::Up
-                        };
-                        self.selection.extend(self.selected_line, direction);
-                    }
-                }
-                self.clamp_scroll();
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.status_message.clear();
-                let old_line = self.selected_line;
-                self.selected_line = self.selected_line.saturating_sub(1);
-                // Extend selection if active
-                if self.selection.is_active() {
-                    let direction = if self.selected_line < old_line {
-                        Direction::Up
-                    } else {
-                        Direction::Down
-                    };
-                    self.selection.extend(self.selected_line, direction);
-                }
-                self.clamp_scroll();
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                self.horizontal_scroll = self.horizontal_scroll.saturating_add(4);
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.horizontal_scroll = self.horizontal_scroll.saturating_sub(4);
-            }
-            KeyCode::Char('G') => {
-                self.selected_line = self.filtered_len().saturating_sub(1);
-                self.clamp_scroll();
-            }
-            KeyCode::Char('g') if key.modifiers.contains(crossterm::event::KeyModifiers::NONE) => {
-                self.selected_line = 0;
-                self.scroll_offset = 0;
-            }
-            KeyCode::Char(':') => {
-                self.mode = Mode::Command;
-            }
-            KeyCode::Char('w') => {
-                self.wrap_mode = !self.wrap_mode;
-                self.visual_cache.set_wrap_mode(self.wrap_mode);
-                self.status_message = if self.wrap_mode {
-                    "Wrap mode enabled".to_string()
-                } else {
-                    "Wrap mode disabled".to_string()
-                };
-            }
-            KeyCode::Char('x') => {
-                if self.selection.is_active() {
-                    // Extend selection - determine direction based on cursor movement
-                    if let Some((start, _end)) = self.selection.range(self.selected_line) {
-                        let direction = if self.selected_line > start {
-                            Direction::Down
-                        } else {
-                            Direction::Up
-                        };
-                        self.selection.extend(self.selected_line, direction);
-                    }
-                } else {
-                    // Start new selection at current cursor
-                    self.selection.start(self.selected_line);
-                }
-            }
-            KeyCode::Char('y') => {
-                self.handle_yank();
-            }
-            KeyCode::Esc => {
-                self.selection.clear();
-                self.status_message.clear();
-            }
-            KeyCode::Char('/') => {
-                self.mode = Mode::SearchInput;
-                // Pre-populate with last search query if exists
-                if let Some(last_query) = &self.search_query {
-                    self.input_buffer = last_query.clone();
-                } else {
-                    self.input_buffer.clear();
-                }
-            }
-            KeyCode::Char('n') => {
-                self.next_match();
-            }
-            KeyCode::Char('N') => {
-                self.prev_match();
-            }
-            _ => {}
+    // Search handlers
+
+    fn on_enter_search(&mut self) {
+        self.mode = Mode::SearchInput;
+        // Pre-populate with last search query if exists
+        if let Some(last_query) = &self.search_query {
+            self.input_buffer = last_query.clone();
+        } else {
+            self.input_buffer.clear();
         }
     }
 
-    /// Handle yank (copy) operation
-    fn handle_yank(&mut self) {
+    fn on_cancel_search(&mut self) {
+        self.mode = Mode::Normal;
+        self.input_buffer.clear();
+    }
+
+    fn on_submit_search(&mut self) {
+        if self.input_buffer.trim().is_empty() {
+            // Empty query clears search
+            self.clear_search();
+        } else {
+            // Execute search with non-empty query
+            let query = self.input_buffer.trim().to_string();
+            self.search_query = Some(query.clone());
+            self.init_search_state(query);
+        }
+        self.mode = Mode::Normal;
+        self.input_buffer.clear();
+    }
+
+    fn on_search_type_char(&mut self, c: char) {
+        self.input_buffer.push(c);
+    }
+
+    fn on_search_backspace(&mut self) {
+        self.input_buffer.pop();
+    }
+
+    fn on_clear_search(&mut self) {
+        self.clear_search();
+        self.status_message.clear();
+    }
+
+    // Selection handlers
+
+    fn on_toggle_selection(&mut self) {
+        if self.selection.is_active() {
+            // Extend selection - determine direction based on cursor movement
+            if let Some((start, _end)) = self.selection.range(self.selected_line) {
+                let direction = if self.selected_line > start {
+                    Direction::Down
+                } else {
+                    Direction::Up
+                };
+                self.selection.extend(self.selected_line, direction);
+            }
+        } else {
+            // Start new selection at current cursor
+            self.selection.start(self.selected_line);
+        }
+    }
+
+    fn on_clear_selection(&mut self) {
+        self.selection.clear();
+        self.status_message.clear();
+    }
+
+    fn on_yank(&mut self) {
         // Check if selection is active
         if !self.selection.is_active() {
             return;
@@ -597,67 +656,53 @@ impl App {
         }
     }
 
-    fn clamp_scroll(&mut self) {
-        if self.filtered_indices.is_empty() {
-            return;
-        }
+    // Filter list handlers
 
-        self.selected_line = self
-            .selected_line
-            .min(self.filtered_len().saturating_sub(1));
-
-        let viewport_height = self.viewport_height.get();
-
-        let effective_height = if self.wrap_mode {
-            (viewport_height / 2).max(1)
-        } else {
-            viewport_height
-        };
-
-        if self.selected_line < self.scroll_offset {
-            self.scroll_offset = self.selected_line;
-        } else if self.selected_line >= self.scroll_offset + effective_height {
-            self.scroll_offset = self
-                .selected_line
-                .saturating_sub(effective_height.saturating_sub(1));
+    fn on_filter_list_down(&mut self) {
+        let total = self.filters.len();
+        if self.filter_list_selected + 1 < total {
+            self.filter_list_selected += 1;
         }
     }
 
-    fn handle_filter_list_key(&mut self, key: crossterm::event::KeyEvent) {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                let total = self.filters.len();
-                if self.filter_list_selected + 1 < total {
-                    self.filter_list_selected += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.filter_list_selected = self.filter_list_selected.saturating_sub(1);
-            }
-            KeyCode::Char('d') => {
-                let includes = self.filters.includes().len();
-                if self.filter_list_selected < includes {
-                    self.filters.remove_include(self.filter_list_selected);
-                } else {
-                    self.filters
-                        .remove_exclude(self.filter_list_selected - includes);
-                }
-                // Ensure selection stays valid after deletion
-                let total = self.filters.len();
-                if self.filter_list_selected >= total && total > 0 {
-                    self.filter_list_selected = total - 1;
-                }
-                self.update_filtered_logs();
-                self.clear_search_on_refilter();
-                if self.filters.is_empty() {
-                    self.mode = Mode::Normal;
-                }
-            }
-            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
-                self.mode = Mode::Normal;
-            }
-            _ => {}
+    fn on_filter_list_up(&mut self) {
+        self.filter_list_selected = self.filter_list_selected.saturating_sub(1);
+    }
+
+    fn on_delete_selected_filter(&mut self) {
+        let includes = self.filters.includes().len();
+        if self.filter_list_selected < includes {
+            self.filters.remove_include(self.filter_list_selected);
+        } else {
+            self.filters
+                .remove_exclude(self.filter_list_selected - includes);
         }
+        // Ensure selection stays valid after deletion
+        let total = self.filters.len();
+        if self.filter_list_selected >= total && total > 0 {
+            self.filter_list_selected = total - 1;
+        }
+        self.update_filtered_logs();
+        self.clear_search_on_refilter();
+        if self.filters.is_empty() {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn on_close_filter_list(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
+    // View option handlers
+
+    fn on_toggle_wrap(&mut self) {
+        self.wrap_mode = !self.wrap_mode;
+        self.visual_cache.set_wrap_mode(self.wrap_mode);
+        self.status_message = if self.wrap_mode {
+            "Wrap mode enabled".to_string()
+        } else {
+            "Wrap mode disabled".to_string()
+        };
     }
 
     /// Get the visual cache (for UI rendering).
